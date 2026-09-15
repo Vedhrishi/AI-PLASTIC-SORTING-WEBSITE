@@ -355,7 +355,7 @@ export default function App() {
         }
 
         const rule = getDisposalRule(resin.label, contamination.label);
-        const lowConfidence = resin.confidence < CONFIDENCE_THRESHOLD || contamination.confidence < CONFIDENCE_THRESHOLD;
+        const lowConfidence = resin.confidence < CONFIDENCE_THRESHOLD;
 
         audio.playSuccess();
         setResult({ resin, contamination, rule, box: plasticBox, simulated: false, lowConfidence });
@@ -1027,7 +1027,7 @@ function ResultCard({ result, onExport, exporting, onScanAgain }) {
       {lowConfidence && (
         <div className="flex items-center gap-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
           <AlertTriangle size={14} className="shrink-0" />
-          Below 80% confidence — consider rescanning with better lighting or a closer angle.
+          Resin confidence below 80% — consider rescanning with better lighting or a closer angle.
         </div>
       )}
 
