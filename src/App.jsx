@@ -307,10 +307,16 @@ export default function App() {
 
     try {
       const cropped = cropAndResize(source, plasticBox);
-      const [resin, contamination] = await Promise.all([
-        classifyResin(resinSession, cropped),
-        classifyContamination(contamSession, cropped),
-      ]);
+
+      // Sequential, not Promise.all: onnxruntime-web's wasm backend shares
+      // one WASM heap/module across sessions, so two concurrent session.run()
+      // calls — even on two different sessions — can race on that shared
+      // runtime state and throw "Session already started". Stage 4 also
+      // gets a freshly-built tensor from its own classifyContamination call
+      // rather than any buffer shared with Stage 3, so there's no risk of a
+      // detached/transferred buffer being reused across the two runs either.
+      const resin = await classifyResin(resinSession, cropped);
+      const contamination = await classifyContamination(contamSession, cropped);
       const rule = getDisposalRule(resin.label, contamination.label);
       const lowConfidence = resin.confidence < CONFIDENCE_THRESHOLD || contamination.confidence < CONFIDENCE_THRESHOLD;
 
