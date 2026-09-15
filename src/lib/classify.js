@@ -33,22 +33,38 @@ export function cropAndResize(source, box) {
   return canvas;
 }
 
+// Converts a 224x224 canvas into a PyTorch-style ImageNet input tensor:
+// planar (channels-first) layout [1, 3, 224, 224] — all R values, then all
+// G values, then all B values — normalized to 0-1 and then to ImageNet
+// mean/std. NOT interleaved/HWC [1, 224, 224, 3], which is what a naive
+// pixel-order copy of ImageData would produce and what a ResNet18 trained
+// on torchvision-style preprocessing will silently misinterpret.
 export function canvasToNormalizedTensor(canvas) {
+  const width = canvas.width;
+  const height = canvas.height;
   const ctx = canvas.getContext('2d');
-  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const size = canvas.width * canvas.height;
-  const float32 = new Float32Array(size * 3);
+  const { data: rgba } = ctx.getImageData(0, 0, width, height); // Uint8ClampedArray, RGBA interleaved
 
-  for (let i = 0; i < size; i++) {
-    const r = data[i * 4] / 255;
-    const g = data[i * 4 + 1] / 255;
-    const b = data[i * 4 + 2] / 255;
-    float32[i] = (r - MEAN[0]) / STD[0];
-    float32[size + i] = (g - MEAN[1]) / STD[1];
-    float32[size * 2 + i] = (b - MEAN[2]) / STD[2];
+  const pixelCount = width * height; // 224 * 224 = 50,176
+  const tensorData = new Float32Array(1 * 3 * height * width); // 150,528 elements
+
+  const rOffset = 0;
+  const gOffset = pixelCount;
+  const bOffset = pixelCount * 2;
+
+  for (let i = 0; i < pixelCount; i++) {
+    const rgbaIndex = i * 4;
+
+    const r = rgba[rgbaIndex] / 255;
+    const g = rgba[rgbaIndex + 1] / 255;
+    const b = rgba[rgbaIndex + 2] / 255;
+
+    tensorData[rOffset + i] = (r - MEAN[0]) / STD[0];
+    tensorData[gOffset + i] = (g - MEAN[1]) / STD[1];
+    tensorData[bOffset + i] = (b - MEAN[2]) / STD[2];
   }
 
-  return new ort.Tensor('float32', float32, [1, 3, canvas.height, canvas.width]);
+  return new ort.Tensor('float32', tensorData, [1, 3, height, width]);
 }
 
 function softmaxArgmax(data) {
@@ -68,20 +84,30 @@ function softmaxArgmax(data) {
 }
 
 export async function classifyResin(session, croppedCanvas) {
-  const tensor = canvasToNormalizedTensor(croppedCanvas);
-  const inputName = session.inputNames[0];
-  const outputName = session.outputNames[0];
-  const results = await session.run({ [inputName]: tensor });
-  const { index, confidence } = softmaxArgmax(results[outputName].data);
-  const resin = RESIN_CODES[index] ?? { code: null, label: 'Unknown' };
-  return { ...resin, confidence };
+  try {
+    const tensor = canvasToNormalizedTensor(croppedCanvas);
+    const inputName = session.inputNames[0];
+    const outputName = session.outputNames[0];
+    const results = await session.run({ [inputName]: tensor });
+    const { index, confidence } = softmaxArgmax(results[outputName].data);
+    const resin = RESIN_CODES[index] ?? { code: null, label: 'Unknown' };
+    return { ...resin, confidence };
+  } catch (err) {
+    console.error('[classifyResin] resin-resnet18 inference failed', err);
+    throw err;
+  }
 }
 
 export async function classifyContamination(session, croppedCanvas) {
-  const tensor = canvasToNormalizedTensor(croppedCanvas);
-  const inputName = session.inputNames[0];
-  const outputName = session.outputNames[0];
-  const results = await session.run({ [inputName]: tensor });
-  const { index, confidence } = softmaxArgmax(results[outputName].data);
-  return { label: CONTAMINATION_LABELS[index] ?? 'Unknown', level: index, confidence };
+  try {
+    const tensor = canvasToNormalizedTensor(croppedCanvas);
+    const inputName = session.inputNames[0];
+    const outputName = session.outputNames[0];
+    const results = await session.run({ [inputName]: tensor });
+    const { index, confidence } = softmaxArgmax(results[outputName].data);
+    return { label: CONTAMINATION_LABELS[index] ?? 'Unknown', level: index, confidence };
+  } catch (err) {
+    console.error('[classifyContamination] contamination-resnet18 inference failed', err);
+    throw err;
+  }
 }

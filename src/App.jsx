@@ -109,9 +109,13 @@ export default function App() {
     async function initModels() {
       const [personModel, plasticSession, resinSession, contamSession] = await Promise.all([
         cocoSsd.load({ base: 'lite_mobilenet_v2' }),
+        // YOLO is the heavy compute stage (640x640 input) — worth the GPU.
         loadSession('/models/best.onnx'),
-        loadSession('/models/resin-resnet18.onnx'),
-        loadSession('/models/contamination-resnet18.onnx'),
+        // ResNet18 classifiers are small/fast on WASM alone; pinning them
+        // to WASM avoids WebGL op-coverage/precision edge cases silently
+        // corrupting classification output on some mobile GPUs.
+        loadSession('/models/resin-resnet18.onnx', { executionProviders: ['wasm'] }),
+        loadSession('/models/contamination-resnet18.onnx', { executionProviders: ['wasm'] }),
       ]);
       if (cancelled) return;
       modelsRef.current = { personModel, plasticSession, resinSession, contamSession };
@@ -266,10 +270,20 @@ export default function App() {
       }
 
       const cropped = cropAndResize(source, plasticBox);
-      const [resin, contamination] = await Promise.all([
-        classifyResin(resinSession, cropped),
-        classifyContamination(contamSession, cropped),
-      ]);
+
+      let resin, contamination;
+      try {
+        [resin, contamination] = await Promise.all([
+          classifyResin(resinSession, cropped),
+          classifyContamination(contamSession, cropped),
+        ]);
+      } catch (err) {
+        console.error('Stage 3/4 classification failed', err);
+        setStatus('classifier-error');
+        setResult(null);
+        setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - tickStart) }));
+        return;
+      }
 
       const rule = getDisposalRule(resin.label, contamination.label);
 
@@ -483,6 +497,8 @@ export default function App() {
           <AnimatePresence mode="wait">
             {status === 'veto' ? (
               <VetoAlert key="veto" />
+            ) : status === 'classifier-error' ? (
+              <ClassifierErrorAlert key="classifier-error" />
             ) : status === 'result' && result ? (
               <ResultCard key="result" result={result} onExport={handleExport} exporting={exporting} />
             ) : (
@@ -654,6 +670,11 @@ function StatusBadge({ status, sourceMode }) {
     },
     'no-item': { text: 'No plastic item detected', color: 'bg-slate-800/80 text-slate-300 border-slate-700/50', icon: Camera },
     result: { text: 'Item identified', color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30', icon: Recycle },
+    'classifier-error': {
+      text: 'Classification failed — check console for details',
+      color: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+      icon: AlertTriangle,
+    },
   }[status] ?? { text: 'Idle', color: 'bg-slate-800/80 text-slate-300 border-slate-700/50', icon: Camera };
 
   const Icon = config.icon;
@@ -788,6 +809,30 @@ function VetoAlert() {
           <h2 className="text-red-300 font-semibold">Containment barrier engaged</h2>
           <p className="text-sm text-red-200/80 mt-1">
             CONTAMINATION RISK: Biometric hand overlap detected. Isolate the item from human contact and hold steady.
+          </p>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function ClassifierErrorAlert() {
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 20, scale: 0.95 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -10, scale: 0.97 }}
+      transition={{ duration: 0.3 }}
+      className="rounded-2xl border border-amber-500/40 backdrop-blur-xl bg-amber-950/30 shadow-2xl shadow-amber-950/40 p-6"
+    >
+      <div className="flex items-start gap-3">
+        <AlertTriangle className="text-amber-400 shrink-0 mt-0.5" size={22} />
+        <div>
+          <h2 className="text-amber-300 font-semibold">Resin/contamination classifier failed</h2>
+          <p className="text-sm text-amber-200/80 mt-1">
+            Stage 2 (plastic detection) succeeded, but Stage 3/4 inference threw an error. Check the browser console for
+            the logged exception — the scan will retry automatically on the next frame.
           </p>
         </div>
       </div>
