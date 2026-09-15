@@ -107,6 +107,7 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState({ fps: 0, latencyMs: 0, engine: 'ONNX Runtime Web · WebGL (GPU) → WASM' });
   const [landedRowKey, setLandedRowKey] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [classifierErrorMessage, setClassifierErrorMessage] = useState(null);
   const [videoDevices, setVideoDevices] = useState([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState(null);
 
@@ -318,9 +319,11 @@ export default function App() {
       setStatus('result');
       setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - analysisStart) }));
     } catch (err) {
-      console.error('[triggerSnapshot] Stage 3/4 analysis failed', err);
+      const message = err?.message ?? String(err);
+      console.error(`[triggerSnapshot] Stage 3/4 analysis failed: ${message}`, err);
       setStatus('classifier-error');
       setResult(null);
+      setClassifierErrorMessage(message);
     }
   }, []);
 
@@ -440,6 +443,7 @@ export default function App() {
     lockedRef.current = false;
     lastDetectionRef.current = null;
     setResult(null);
+    setClassifierErrorMessage(null);
     setStatus('idle');
     videoRef.current?.play();
   }, []);
@@ -696,7 +700,11 @@ export default function App() {
             {status === 'veto' ? (
               <VetoAlert key="veto" />
             ) : status === 'classifier-error' ? (
-              <ClassifierErrorAlert key="classifier-error" onScanAgain={sourceMode === 'camera' ? scanAgain : undefined} />
+              <ClassifierErrorAlert
+                key="classifier-error"
+                message={classifierErrorMessage}
+                onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
+              />
             ) : status === 'result' && result ? (
               <ResultCard
                 key="result"
@@ -1067,7 +1075,7 @@ function VetoAlert() {
   );
 }
 
-function ClassifierErrorAlert({ onScanAgain }) {
+function ClassifierErrorAlert({ message, onScanAgain }) {
   return (
     <motion.div
       layout
@@ -1082,9 +1090,13 @@ function ClassifierErrorAlert({ onScanAgain }) {
         <div>
           <h2 className="text-amber-300 font-semibold">Resin/contamination classifier failed</h2>
           <p className="text-sm text-amber-200/80 mt-1">
-            Stage 2 (plastic detection) succeeded, but Stage 3/4 inference on the captured snapshot threw an error. Check
-            the browser console for the logged exception.
+            Stage 2 (plastic detection) succeeded, but Stage 3/4 inference on the captured snapshot threw an error.
           </p>
+          {message && (
+            <code className="block mt-2 text-xs text-amber-300/90 bg-amber-950/60 border border-amber-500/20 rounded-lg px-3 py-2 font-mono break-words">
+              {message}
+            </code>
+          )}
         </div>
       </div>
       {onScanAgain && (
