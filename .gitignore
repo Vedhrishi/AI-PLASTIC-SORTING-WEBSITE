@@ -18,6 +18,10 @@ Thumbs.db
 /test-results
 /screenshot*.png
 
+# Local eval test images (keep the folder's README, not the photos)
+/test-images/*
+!/test-images/README.md
+
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

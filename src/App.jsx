@@ -638,7 +638,7 @@ export default function App() {
   }, [result]);
 
   return (
-    <div className="min-h-screen bg-[#05060a] text-gray-100">
+    <div className="min-h-screen bg-[#05060a] text-gray-100" data-testid="app-root" data-load-state={loadState}>
       <header className="border-b border-slate-800/60 backdrop-blur-xl bg-slate-950/40 px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between gap-2 sm:gap-3 sticky top-0 z-30">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <div className="relative shrink-0">
@@ -811,7 +811,7 @@ function VideoHud({ containerRef, videoRef, overlayRef, uploadCanvasRef, loadSta
       )}
 
       {loadState !== 'ready' && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 backdrop-blur-xl bg-slate-950/80 text-sm">
+        <div data-testid="loading-overlay" className="absolute inset-0 flex flex-col items-center justify-center gap-3 backdrop-blur-xl bg-slate-950/80 text-sm">
           {loadState === 'loading' && (
             <>
               <Loader2 className="animate-spin text-emerald-400" size={28} />
@@ -950,6 +950,8 @@ function StatusBadge({ status, sourceMode }) {
       )}
       <motion.div
         key={status}
+        data-testid="status-badge"
+        data-status={status}
         initial={{ opacity: 0, y: 6 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.25 }}
@@ -997,7 +999,7 @@ function ConfidenceMeter({ label, value, colorClass = 'from-emerald-400 to-cyan-
   );
 }
 
-function ConfidenceRing({ label, value, ringClass = 'text-emerald-400' }) {
+function ConfidenceRing({ label, value, ringClass = 'text-emerald-400', testId, labelTestId }) {
   const pct = Math.round(value * 100);
   const radius = 26;
   const circumference = 2 * Math.PI * radius;
@@ -1023,12 +1025,12 @@ function ConfidenceRing({ label, value, ringClass = 'text-emerald-400' }) {
             transition={{ duration: 0.8, ease: 'easeOut' }}
           />
         </svg>
-        <span className="absolute inset-0 flex items-center justify-center text-sm font-semibold text-gray-100">
+        <span data-testid={testId} className="absolute inset-0 flex items-center justify-center text-sm font-semibold text-gray-100">
           {pct}%
         </span>
       </div>
       <div className="min-w-0">
-        <div className="text-[10px] uppercase tracking-wide text-gray-500">{label}</div>
+        <div data-testid={labelTestId} className="text-[10px] uppercase tracking-wide text-gray-500">{label}</div>
       </div>
     </div>
   );
@@ -1125,6 +1127,7 @@ function ResultCard({ result, onExport, exporting, onScanAgain }) {
   return (
     <motion.div
       layout
+      data-testid="result-panel"
       initial={{ opacity: 0, y: 20, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -10, scale: 0.97 }}
@@ -1134,7 +1137,9 @@ function ResultCard({ result, onExport, exporting, onScanAgain }) {
       }`}
     >
       <div className="flex items-baseline justify-between">
-        <h2 className={`text-lg font-semibold ${lowConfidence ? 'text-amber-300' : 'text-emerald-300'}`}>{resin.label}</h2>
+        <h2 data-testid="result-resin" data-resin-code={resin.code} className={`text-lg font-semibold ${lowConfidence ? 'text-amber-300' : 'text-emerald-300'}`}>
+          {resin.label}
+        </h2>
         <div className="flex items-center gap-2">
           {simulated && (
             <span className="text-[10px] uppercase tracking-wide text-cyan-300 border border-cyan-500/40 rounded-full px-2 py-0.5">
@@ -1153,7 +1158,7 @@ function ResultCard({ result, onExport, exporting, onScanAgain }) {
       )}
 
       <div className="flex items-center justify-around gap-4 py-1">
-        <ConfidenceRing label="Resin confidence" value={resin.confidence} ringClass="text-emerald-400" />
+        <ConfidenceRing label="Resin confidence" value={resin.confidence} ringClass="text-emerald-400" testId="result-resin-confidence" />
         <ConfidenceRing
           label={contamination.label}
           value={contamination.confidence}
@@ -1164,6 +1169,8 @@ function ResultCard({ result, onExport, exporting, onScanAgain }) {
                 ? 'text-amber-400'
                 : 'text-red-400'
           }
+          testId="result-contamination-confidence"
+          labelTestId="result-contamination"
         />
       </div>
 
