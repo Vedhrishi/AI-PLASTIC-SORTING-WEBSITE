@@ -5,18 +5,14 @@ ort.env.wasm.numThreads = 1;
 
 const sessionCache = new Map();
 
-export async function loadSession(modelPath) {
+export async function loadSession(modelPath, { executionProviders = ['webgl', 'wasm'] } = {}) {
   if (sessionCache.has(modelPath)) return sessionCache.get(modelPath);
 
   let session;
   try {
-    // Prefer the mobile/desktop GPU (WebGL) for the conv-heavy YOLO/ResNet
-    // graphs; unsupported ops fall back to WASM within the same session.
-    session = await ort.InferenceSession.create(modelPath, {
-      executionProviders: ['webgl', 'wasm'],
-    });
+    session = await ort.InferenceSession.create(modelPath, { executionProviders });
   } catch (err) {
-    console.warn(`WebGL EP unavailable for ${modelPath}, falling back to WASM only`, err);
+    console.warn(`${executionProviders.join('/')} EP unavailable for ${modelPath}, falling back to WASM only`, err);
     session = await ort.InferenceSession.create(modelPath, {
       executionProviders: ['wasm'],
     });
