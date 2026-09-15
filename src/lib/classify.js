@@ -64,6 +64,18 @@ export function canvasToNormalizedTensor(canvas) {
     tensorData[bOffset + i] = (b - MEAN[2]) / STD[2];
   }
 
+  // Guard the exact element count BEFORE constructing the tensor. If the
+  // cropped canvas wasn't actually 224x224 (a bad box from Stage 2, or a
+  // crop that silently failed), this fails loud and early instead of
+  // handing ONNX Runtime a shape mismatch it reports as an opaque error.
+  const expectedLength = 1 * 3 * CLASSIFIER_INPUT_SIZE * CLASSIFIER_INPUT_SIZE;
+  if (tensorData.length !== expectedLength) {
+    throw new Error(
+      `canvasToNormalizedTensor: expected ${expectedLength} elements (1x3x${CLASSIFIER_INPUT_SIZE}x${CLASSIFIER_INPUT_SIZE}) ` +
+        `but got ${tensorData.length} — the source canvas was ${width}x${height}, not ${CLASSIFIER_INPUT_SIZE}x${CLASSIFIER_INPUT_SIZE}.`
+    );
+  }
+
   return new ort.Tensor('float32', tensorData, [1, 3, height, width]);
 }
 
@@ -83,9 +95,23 @@ function softmaxArgmax(data) {
   return { index: bestIdx, confidence: bestProb };
 }
 
+// Logs everything needed to diagnose a session.run() failure at a glance:
+// the actual error message (not just the Error object's default toString,
+// which onnxruntime-web often leaves unhelpfully generic), what input/output
+// names the model itself reports, and the exact tensor shape we attempted.
+function logInferenceFailure(label, err, session, tensor) {
+  console.error(
+    `[${label}] inference failed: ${err?.message ?? err}\n` +
+      `  model expects input(s): [${session?.inputNames?.join(', ')}], output(s): [${session?.outputNames?.join(', ')}]\n` +
+      `  tensor sent: dims=[${tensor?.dims?.join(', ')}] length=${tensor?.data?.length}`,
+    err
+  );
+}
+
 export async function classifyResin(session, croppedCanvas) {
+  let tensor;
   try {
-    const tensor = canvasToNormalizedTensor(croppedCanvas);
+    tensor = canvasToNormalizedTensor(croppedCanvas);
     const inputName = session.inputNames[0];
     const outputName = session.outputNames[0];
     const results = await session.run({ [inputName]: tensor });
@@ -93,21 +119,22 @@ export async function classifyResin(session, croppedCanvas) {
     const resin = RESIN_CODES[index] ?? { code: null, label: 'Unknown' };
     return { ...resin, confidence };
   } catch (err) {
-    console.error('[classifyResin] resin-resnet18 inference failed', err);
+    logInferenceFailure('classifyResin', err, session, tensor);
     throw err;
   }
 }
 
 export async function classifyContamination(session, croppedCanvas) {
+  let tensor;
   try {
-    const tensor = canvasToNormalizedTensor(croppedCanvas);
+    tensor = canvasToNormalizedTensor(croppedCanvas);
     const inputName = session.inputNames[0];
     const outputName = session.outputNames[0];
     const results = await session.run({ [inputName]: tensor });
     const { index, confidence } = softmaxArgmax(results[outputName].data);
     return { label: CONTAMINATION_LABELS[index] ?? 'Unknown', level: index, confidence };
   } catch (err) {
-    console.error('[classifyContamination] contamination-resnet18 inference failed', err);
+    logInferenceFailure('classifyContamination', err, session, tensor);
     throw err;
   }
 }
