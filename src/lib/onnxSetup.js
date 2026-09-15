@@ -7,9 +7,21 @@ const sessionCache = new Map();
 
 export async function loadSession(modelPath) {
   if (sessionCache.has(modelPath)) return sessionCache.get(modelPath);
-  const session = await ort.InferenceSession.create(modelPath, {
-    executionProviders: ['wasm'],
-  });
+
+  let session;
+  try {
+    // Prefer the mobile/desktop GPU (WebGL) for the conv-heavy YOLO/ResNet
+    // graphs; unsupported ops fall back to WASM within the same session.
+    session = await ort.InferenceSession.create(modelPath, {
+      executionProviders: ['webgl', 'wasm'],
+    });
+  } catch (err) {
+    console.warn(`WebGL EP unavailable for ${modelPath}, falling back to WASM only`, err);
+    session = await ort.InferenceSession.create(modelPath, {
+      executionProviders: ['wasm'],
+    });
+  }
+
   sessionCache.set(modelPath, session);
   return session;
 }

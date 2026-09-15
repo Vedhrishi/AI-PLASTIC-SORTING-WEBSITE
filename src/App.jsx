@@ -22,7 +22,7 @@ import {
 import { loadSession } from './lib/onnxSetup';
 import { detectPlastic } from './lib/yolo';
 import { classifyResin, classifyContamination, cropAndResize } from './lib/classify';
-import { overlapFraction } from './lib/geometry';
+import { overlapFraction, mapCoverBox } from './lib/geometry';
 import { DISPOSAL_RULES, getDisposalRule } from './data/disposalRules';
 import { RESIN_INFO, CONTAMINATION_INFO } from './data/resinInfo';
 import { buildInspectionCertificate, downloadCertificate } from './lib/audit';
@@ -30,7 +30,6 @@ import * as audio from './lib/audioManager';
 
 const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 480;
-const SCAN_INTERVAL_MS = 600;
 const PERSON_VETO_IOU = 0.2;
 const YOLO_FALLBACK_MIN_SCORE = 0.3;
 
@@ -64,7 +63,7 @@ export default function App() {
   const overlayRef = useRef(null);
   const uploadCanvasRef = useRef(null);
   const modelsRef = useRef(null);
-  const runningRef = useRef(false);
+  const isProcessingRef = useRef(false);
   const lockedRef = useRef(false);
   const lastVetoAudioRef = useRef(0);
   const lastTickAtRef = useRef(0);
@@ -80,7 +79,7 @@ export default function App() {
   const [sourceMode, setSourceMode] = useState('camera'); // camera | upload | preset
   const [uploadImg, setUploadImg] = useState(null);
   const [isDragActive, setIsDragActive] = useState(false);
-  const [diagnostics, setDiagnostics] = useState({ fps: 0, latencyMs: 0, engine: 'ONNX Runtime Web · WASM (CPU)' });
+  const [diagnostics, setDiagnostics] = useState({ fps: 0, latencyMs: 0, engine: 'ONNX Runtime Web · WebGL (GPU) → WASM' });
   const [landedRowKey, setLandedRowKey] = useState(null);
   const [exporting, setExporting] = useState(false);
 
@@ -140,7 +139,7 @@ export default function App() {
     };
   }, []);
 
-  const drawOverlay = useCallback((plasticBox, personBoxes, vetoed, extraLabel) => {
+  const drawOverlay = useCallback((plasticBox, personBoxes, vetoed, extraLabel, nativeW, nativeH) => {
     const canvas = overlayRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -149,8 +148,13 @@ export default function App() {
     ctx.lineWidth = 2;
     ctx.font = '12px ui-monospace, monospace';
 
+    // Native frame -> displayed (object-fit: cover) container space. A no-op
+    // when the source is already container-sized (upload/preset canvases).
+    const toScreen = (box) =>
+      nativeW && nativeH ? mapCoverBox(box, nativeW, nativeH, VIDEO_WIDTH, VIDEO_HEIGHT) : box;
+
     for (const p of personBoxes) {
-      const [x1, y1, x2, y2] = p;
+      const [x1, y1, x2, y2] = toScreen(p);
       ctx.strokeStyle = vetoed ? '#f87171' : 'rgba(248,113,113,0.5)';
       ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
       ctx.fillStyle = ctx.strokeStyle;
@@ -158,7 +162,7 @@ export default function App() {
     }
 
     if (plasticBox) {
-      const [x1, y1, x2, y2] = plasticBox;
+      const [x1, y1, x2, y2] = toScreen(plasticBox);
       const w = x2 - x1;
       const h = y2 - y1;
       const color = vetoed ? '#f87171' : '#34d399';
@@ -229,19 +233,21 @@ export default function App() {
         }
       }
 
+      // No plastic found (Stage 2) — skip Stage 3/4 entirely and save the compute.
       if (!plasticBox) {
         setStatus('no-item');
         setResult(null);
         lockedRef.current = false;
-        drawOverlay(null, personBoxes, false);
+        drawOverlay(null, personBoxes, false, undefined, srcW, srcH);
         setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - tickStart) }));
         return;
       }
 
       const vetoed = personBoxes.some((personBox) => overlapFraction(plasticBox, personBox) > PERSON_VETO_IOU);
 
-      drawOverlay(plasticBox, personBoxes, vetoed, usedFallback && !vetoed ? 'PLASTIC (fallback)' : undefined);
+      drawOverlay(plasticBox, personBoxes, vetoed, usedFallback && !vetoed ? 'PLASTIC (fallback)' : undefined, srcW, srcH);
 
+      // Hand/person overlap veto — also skip Stage 3/4 here.
       if (vetoed) {
         setStatus('veto');
         setResult(null);
@@ -276,30 +282,46 @@ export default function App() {
   );
 
   // ---- continuous detection loop (camera mode only) ----
+  // Self-scheduling via rAF: the next frame is only grabbed once the full
+  // 4-stage pipeline for the previous one has resolved. isProcessingRef is
+  // the hard lock — a frame in flight is never interrupted or doubled up,
+  // which is what keeps this smooth instead of piling up work on a slow
+  // mobile GPU/CPU.
   useEffect(() => {
     if (loadState !== 'ready' || sourceMode !== 'camera') return;
     let cancelled = false;
+    let rafId;
 
     async function tick() {
-      if (cancelled || runningRef.current) return;
+      if (cancelled) return;
+
+      if (isProcessingRef.current) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
+
       const video = videoRef.current;
-      if (!video || video.readyState < 2) return;
-      runningRef.current = true;
+      if (!video || video.readyState < 2 || !video.videoWidth) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
+
+      isProcessingRef.current = true;
       try {
-        await runPipeline(video, VIDEO_WIDTH, VIDEO_HEIGHT);
+        await runPipeline(video, video.videoWidth, video.videoHeight);
       } catch (err) {
         console.error('pipeline error', err);
       } finally {
-        runningRef.current = false;
+        isProcessingRef.current = false;
+        if (!cancelled) rafId = requestAnimationFrame(tick);
       }
     }
 
-    const interval = setInterval(tick, SCAN_INTERVAL_MS);
-    tick();
+    rafId = requestAnimationFrame(tick);
 
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      cancelAnimationFrame(rafId);
     };
   }, [loadState, sourceMode, runPipeline]);
 
@@ -317,13 +339,13 @@ export default function App() {
         displayCanvas.getContext('2d').drawImage(canvas, 0, 0);
       }
       if (cancelled) return;
-      runningRef.current = true;
+      isProcessingRef.current = true;
       try {
         await runPipeline(canvas, VIDEO_WIDTH, VIDEO_HEIGHT);
       } catch (err) {
         console.error('pipeline error', err);
       } finally {
-        runningRef.current = false;
+        isProcessingRef.current = false;
       }
     }
 
