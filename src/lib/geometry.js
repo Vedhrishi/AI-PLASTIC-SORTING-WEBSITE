@@ -33,22 +33,39 @@ export function overlapFraction(boxA, boxB) {
   return interArea / areaA;
 }
 
-// Maps a box from the native source frame (e.g. video.videoWidth x
-// video.videoHeight) into the coordinate space of a container that displays
-// that frame with `object-fit: cover` (crops to fill, preserving aspect
-// ratio). Needed because CSS `object-fit: cover` visually crops/scales the
-// video independently of the pixel buffer the model actually saw, so a raw
-// model-space box drawn without this correction drifts off the real object
-// whenever the camera's native aspect ratio differs from the container's.
-export function mapCoverBox(box, nativeW, nativeH, containerW, containerH) {
-  const scale = Math.max(containerW / nativeW, containerH / nativeH);
-  const visibleW = containerW / scale;
-  const visibleH = containerH / scale;
-  const cropX = (nativeW - visibleW) / 2;
-  const cropY = (nativeH - visibleH) / 2;
+// Computes the scale/offset that CSS `object-fit: cover` applies when a
+// videoW x videoH source is displayed inside a containerW x containerH box:
+// the source is scaled up by the LARGER of the two axis ratios (so it fully
+// covers the container with no gaps) and centered, cropping whichever axis
+// overflows. offsetX/offsetY can come out negative — that's the crop, not a
+// bug — a native-space point maps to screen space via `point * scale +
+// offset`. This must be recomputed from the element's *live* clientWidth/
+// clientHeight (not an assumed constant), since that's the only value that
+// actually reflects the real on-screen box across phones, orientations, and
+// dynamic viewport resizing.
+export function computeCoverProjection(videoW, videoH, containerW, containerH) {
+  const videoRatio = videoW / videoH;
+  const containerRatio = containerW / containerH;
+  let scale;
+  let offsetX = 0;
+  let offsetY = 0;
 
+  if (containerRatio > videoRatio) {
+    scale = containerW / videoW;
+    offsetY = (containerH - videoH * scale) / 2;
+  } else {
+    scale = containerH / videoH;
+    offsetX = (containerW - videoW * scale) / 2;
+  }
+
+  return { scale, offsetX, offsetY };
+}
+
+// Projects a box from native source-frame coordinates into the screen-space
+// coordinates produced by `computeCoverProjection`.
+export function projectBox(box, { scale, offsetX, offsetY }) {
   const [x1, y1, x2, y2] = box;
-  return [(x1 - cropX) * scale, (y1 - cropY) * scale, (x2 - cropX) * scale, (y2 - cropY) * scale];
+  return [x1 * scale + offsetX, y1 * scale + offsetY, x2 * scale + offsetX, y2 * scale + offsetY];
 }
 
 export function nms(boxes, scores, iouThreshold = 0.45) {

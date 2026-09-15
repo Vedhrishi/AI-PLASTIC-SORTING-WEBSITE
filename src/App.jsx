@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
-import '@tensorflow/tfjs';
+import * as tf from '@tensorflow/tfjs';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Camera,
@@ -22,7 +22,7 @@ import {
 import { loadSession } from './lib/onnxSetup';
 import { detectPlastic } from './lib/yolo';
 import { classifyResin, classifyContamination, cropAndResize } from './lib/classify';
-import { overlapFraction, mapCoverBox } from './lib/geometry';
+import { overlapFraction, computeCoverProjection, projectBox } from './lib/geometry';
 import { DISPOSAL_RULES, getDisposalRule } from './data/disposalRules';
 import { RESIN_INFO, CONTAMINATION_INFO } from './data/resinInfo';
 import { buildInspectionCertificate, downloadCertificate } from './lib/audit';
@@ -32,6 +32,9 @@ const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 480;
 const PERSON_VETO_IOU = 0.2;
 const YOLO_FALLBACK_MIN_SCORE = 0.3;
+// Inference is throttled to this cadence; the render loop (rAF, ~60fps) is
+// fully decoupled from it and just keeps redrawing the last cached result.
+const INFERENCE_INTERVAL_MS = 280;
 
 const RESIN_ORDER = ['PET', 'HDPE', 'PP', 'PS'];
 const CONTAMINATION_ORDER = ['Clean/Light Soiling', 'Moderate Contamination', 'Heavy Contamination'];
@@ -62,11 +65,16 @@ export default function App() {
   const videoRef = useRef(null);
   const overlayRef = useRef(null);
   const uploadCanvasRef = useRef(null);
+  const containerRef = useRef(null);
   const modelsRef = useRef(null);
   const isProcessingRef = useRef(false);
   const lockedRef = useRef(false);
   const lastVetoAudioRef = useRef(0);
   const lastTickAtRef = useRef(0);
+  const lastInferenceAtRef = useRef(0);
+  // Cached HUD state, written by the (throttled) inference loop and read
+  // every frame by the (60fps rAF) render loop — this is the decoupling.
+  const lastDetectionRef = useRef(null);
   const rowRefs = useRef({});
   const tableScrollRef = useRef(null);
 
@@ -107,6 +115,13 @@ export default function App() {
     }
 
     async function initModels() {
+      try {
+        await tf.setBackend('webgl');
+      } catch (err) {
+        console.warn('tfjs WebGL backend unavailable, falling back to default backend', err);
+      }
+      await tf.ready();
+
       const [personModel, plasticSession, resinSession, contamSession] = await Promise.all([
         cocoSsd.load({ base: 'lite_mobilenet_v2' }),
         // YOLO is the heavy compute stage (640x640 input) — worth the GPU.
@@ -145,7 +160,22 @@ export default function App() {
 
   const drawOverlay = useCallback((plasticBox, personBoxes, vetoed, extraLabel, nativeW, nativeH) => {
     const canvas = overlayRef.current;
-    if (!canvas) return;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    // Read the box's LIVE on-screen size — not an assumed constant — so the
+    // projection is correct on any phone, any orientation, any viewport
+    // resize. The canvas buffer is sized to match 1:1, so no extra CSS
+    // scaling is stacked on top of this math.
+    const clientW = container.clientWidth;
+    const clientH = container.clientHeight;
+    if (clientW === 0 || clientH === 0) return;
+
+    if (canvas.width !== clientW || canvas.height !== clientH) {
+      canvas.width = clientW;
+      canvas.height = clientH;
+    }
+
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -153,9 +183,13 @@ export default function App() {
     ctx.font = '12px ui-monospace, monospace';
 
     // Native frame -> displayed (object-fit: cover) container space. A no-op
-    // when the source is already container-sized (upload/preset canvases).
-    const toScreen = (box) =>
-      nativeW && nativeH ? mapCoverBox(box, nativeW, nativeH, VIDEO_WIDTH, VIDEO_HEIGHT) : box;
+    // when the source is already container-sized (upload/preset canvases,
+    // where nativeW/nativeH already equal clientW/clientH's own ratio).
+    const toScreen = (box) => {
+      if (!nativeW || !nativeH) return box;
+      const projection = computeCoverProjection(nativeW, nativeH, clientW, clientH);
+      return projectBox(box, projection);
+    };
 
     for (const p of personBoxes) {
       const [x1, y1, x2, y2] = toScreen(p);
@@ -242,14 +276,30 @@ export default function App() {
         setStatus('no-item');
         setResult(null);
         lockedRef.current = false;
-        drawOverlay(null, personBoxes, false, undefined, srcW, srcH);
+        lastDetectionRef.current = {
+          plasticBox: null,
+          personBoxes,
+          vetoed: false,
+          extraLabel: undefined,
+          nativeW: srcW,
+          nativeH: srcH,
+        };
         setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - tickStart) }));
         return;
       }
 
       const vetoed = personBoxes.some((personBox) => overlapFraction(plasticBox, personBox) > PERSON_VETO_IOU);
 
-      drawOverlay(plasticBox, personBoxes, vetoed, usedFallback && !vetoed ? 'PLASTIC (fallback)' : undefined, srcW, srcH);
+      // Cache immediately — the box is valid as soon as Stage 2 resolves,
+      // independent of whether Stage 3/4 classification below succeeds.
+      lastDetectionRef.current = {
+        plasticBox,
+        personBoxes,
+        vetoed,
+        extraLabel: usedFallback && !vetoed ? 'PLASTIC (fallback)' : undefined,
+        nativeW: srcW,
+        nativeH: srcH,
+      };
 
       // Hand/person overlap veto — also skip Stage 3/4 here.
       if (vetoed) {
@@ -292,15 +342,17 @@ export default function App() {
       setStatus('result');
       setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - tickStart) }));
     },
-    [drawOverlay]
+    []
   );
 
-  // ---- continuous detection loop (camera mode only) ----
-  // Self-scheduling via rAF: the next frame is only grabbed once the full
-  // 4-stage pipeline for the previous one has resolved. isProcessingRef is
-  // the hard lock — a frame in flight is never interrupted or doubled up,
-  // which is what keeps this smooth instead of piling up work on a slow
-  // mobile GPU/CPU.
+  // ---- throttled inference loop (camera mode only) ----
+  // Polls at rAF cadence but only actually STARTS a pipeline run once both
+  // gates pass: isProcessingRef (previous run fully resolved — never
+  // overlap) AND the INFERENCE_INTERVAL_MS timestamp gate (never run more
+  // often than every ~250-300ms, regardless of how fast the device is).
+  // This loop only ever writes into lastDetectionRef; the separate render
+  // loop below is what actually draws, at full rAF rate, decoupled from
+  // this throttle.
   useEffect(() => {
     if (loadState !== 'ready' || sourceMode !== 'camera') return;
     let cancelled = false;
@@ -309,7 +361,10 @@ export default function App() {
     async function tick() {
       if (cancelled) return;
 
-      if (isProcessingRef.current) {
+      const nowTs = performance.now();
+      const dueForInference = nowTs - lastInferenceAtRef.current >= INFERENCE_INTERVAL_MS;
+
+      if (isProcessingRef.current || !dueForInference) {
         rafId = requestAnimationFrame(tick);
         return;
       }
@@ -320,6 +375,7 @@ export default function App() {
         return;
       }
 
+      lastInferenceAtRef.current = nowTs;
       isProcessingRef.current = true;
       try {
         await runPipeline(video, video.videoWidth, video.videoHeight);
@@ -338,6 +394,32 @@ export default function App() {
       cancelAnimationFrame(rafId);
     };
   }, [loadState, sourceMode, runPipeline]);
+
+  // ---- render loop: redraws the HUD overlay every frame from the cached
+  // detection, fully decoupled from the throttled inference loop above.
+  // Keeps the box locked/stable on screen between inference ticks and stays
+  // correctly projected even if the viewport resizes mid-scan.
+  useEffect(() => {
+    if (loadState !== 'ready' || sourceMode === 'preset') return;
+    let cancelled = false;
+    let rafId;
+
+    function renderTick() {
+      if (cancelled) return;
+      const det = lastDetectionRef.current;
+      if (det) {
+        drawOverlay(det.plasticBox, det.personBoxes, det.vetoed, det.extraLabel, det.nativeW, det.nativeH);
+      }
+      rafId = requestAnimationFrame(renderTick);
+    }
+
+    rafId = requestAnimationFrame(renderTick);
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+    };
+  }, [loadState, sourceMode, drawOverlay]);
 
   // ---- single-shot pipeline for an uploaded image ----
   useEffect(() => {
@@ -387,6 +469,7 @@ export default function App() {
     if (!file || !file.type.startsWith('image/')) return;
     const img = new Image();
     img.onload = () => {
+      lastDetectionRef.current = null;
       setSourceMode('upload');
       setUploadImg(img);
     };
@@ -394,6 +477,7 @@ export default function App() {
   }, []);
 
   const applyPreset = useCallback((preset) => {
+    lastDetectionRef.current = null;
     setSourceMode('preset');
     setUploadImg(null);
     setStatus('scanning');
@@ -415,6 +499,7 @@ export default function App() {
   }, []);
 
   const returnToCamera = useCallback(() => {
+    lastDetectionRef.current = null;
     setSourceMode('camera');
     setUploadImg(null);
     setStatus('idle');
@@ -469,6 +554,7 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 grid gap-6 sm:gap-8 lg:grid-cols-[640px_1fr]">
         <section className="space-y-4">
           <VideoHud
+            containerRef={containerRef}
             videoRef={videoRef}
             overlayRef={overlayRef}
             uploadCanvasRef={uploadCanvasRef}
@@ -522,9 +608,10 @@ export default function App() {
   );
 }
 
-function VideoHud({ videoRef, overlayRef, uploadCanvasRef, loadState, loadError, status, sourceMode, isDragActive, onDragActive, onFiles }) {
+function VideoHud({ containerRef, videoRef, overlayRef, uploadCanvasRef, loadState, loadError, status, sourceMode, isDragActive, onDragActive, onFiles }) {
   return (
     <div
+      ref={containerRef}
       className={`relative rounded-2xl overflow-hidden border border-slate-700/50 bg-black shadow-2xl ${isDragActive ? 'dropzone-active' : ''}`}
       style={{ width: VIDEO_WIDTH, maxWidth: '100%', aspectRatio: `${VIDEO_WIDTH}/${VIDEO_HEIGHT}` }}
       onDragOver={(e) => {
@@ -708,9 +795,10 @@ function DiagnosticsBar({ diagnostics }) {
       <span className="flex items-center gap-1.5 text-cyan-400/80">
         <Activity size={12} /> DIAGNOSTICS
       </span>
-      <span>FPS <span className="text-gray-300">{diagnostics.fps || '--'}</span></span>
+      <span>INFERENCE <span className="text-gray-300">{diagnostics.fps || '--'} Hz</span></span>
       <span>LATENCY <span className="text-gray-300">{diagnostics.latencyMs || '--'} ms</span></span>
       <span>ENGINE <span className="text-gray-300">{diagnostics.engine}</span></span>
+      <span>RENDER <span className="text-gray-300">60fps (decoupled)</span></span>
       <span>TENSORS <span className="text-gray-300">640×640 → 224×224</span></span>
     </div>
   );
