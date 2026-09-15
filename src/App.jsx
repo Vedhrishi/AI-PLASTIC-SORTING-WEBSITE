@@ -17,12 +17,15 @@ import {
   Sparkles,
   Download,
   Activity,
+  RotateCcw,
+  Target,
+  ChevronDown,
 } from 'lucide-react';
 
 import { loadSession } from './lib/onnxSetup';
 import { detectPlastic } from './lib/yolo';
 import { classifyResin, classifyContamination, cropAndResize } from './lib/classify';
-import { overlapFraction, computeCoverProjection, projectBox } from './lib/geometry';
+import { overlapFraction, computeCoverProjection, projectBox, iou } from './lib/geometry';
 import { DISPOSAL_RULES, getDisposalRule } from './data/disposalRules';
 import { RESIN_INFO, CONTAMINATION_INFO } from './data/resinInfo';
 import { buildInspectionCertificate, downloadCertificate } from './lib/audit';
@@ -35,6 +38,12 @@ const YOLO_FALLBACK_MIN_SCORE = 0.3;
 // Inference is throttled to this cadence; the render loop (rAF, ~60fps) is
 // fully decoupled from it and just keeps redrawing the last cached result.
 const INFERENCE_INTERVAL_MS = 280;
+// Steady-state snapshot: Stage 1/2 (veto + YOLO box) run continuously and
+// cheaply; Stage 3/4 (the two ResNet18 classifiers) only run ONCE, when the
+// box has held roughly still for this long.
+const STABILITY_HOLD_MS = 1500;
+const STABILITY_IOU_THRESHOLD = 0.7;
+const CONFIDENCE_THRESHOLD = 0.8;
 
 const RESIN_ORDER = ['PET', 'HDPE', 'PP', 'PS'];
 const CONTAMINATION_ORDER = ['Clean/Light Soiling', 'Moderate Contamination', 'Heavy Contamination'];
@@ -67,6 +76,7 @@ export default function App() {
   const uploadCanvasRef = useRef(null);
   const containerRef = useRef(null);
   const modelsRef = useRef(null);
+  const streamRef = useRef(null);
   const isProcessingRef = useRef(false);
   const lockedRef = useRef(false);
   const lastVetoAudioRef = useRef(0);
@@ -75,12 +85,19 @@ export default function App() {
   // Cached HUD state, written by the (throttled) inference loop and read
   // every frame by the (60fps rAF) render loop — this is the decoupling.
   const lastDetectionRef = useRef(null);
+  // { box, firstSeenAt } — tracks how long the current plastic box has held
+  // roughly still, to trigger the once-only snapshot analysis.
+  const stableBoxRef = useRef(null);
+  // True from the moment a snapshot is triggered until "Scan Again" — the
+  // continuous Stage 1/2 loop skips entirely while this is set, since the
+  // video is paused and there's nothing new to look at.
+  const snapshotActiveRef = useRef(false);
   const rowRefs = useRef({});
   const tableScrollRef = useRef(null);
 
   const [loadState, setLoadState] = useState('loading'); // loading | ready | error
   const [loadError, setLoadError] = useState(null);
-  const [status, setStatus] = useState('idle'); // idle | scanning | veto | result | no-item
+  const [status, setStatus] = useState('idle'); // idle | scanning | locking | veto | analyzing | result | no-item | classifier-error
   const [result, setResult] = useState(null);
   const [drawerRule, setDrawerRule] = useState(null);
   const [muted, setMuted] = useState(false);
@@ -90,29 +107,65 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState({ fps: 0, latencyMs: 0, engine: 'ONNX Runtime Web · WebGL (GPU) → WASM' });
   const [landedRowKey, setLandedRowKey] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [videoDevices, setVideoDevices] = useState([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState(null);
 
   useEffect(() => {
     audio.setMuted(muted);
   }, [muted]);
 
-  // ---- load webcam + models in parallel (camera issues shouldn't block model loading) ----
-  useEffect(() => {
-    let stream;
-    let cancelled = false;
+  // Starts (or switches to) a camera. Pass a deviceId to target a specific
+  // device (from the dropdown); omit it for the initial best-guess pick
+  // (rear/environment camera on phones, whatever default on laptops).
+  // Device *labels* are only populated by enumerateDevices() after
+  // permission has been granted at least once, so we always re-enumerate
+  // right after a successful getUserMedia call.
+  const startCamera = useCallback(async (deviceId) => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
 
-    async function initCamera() {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: VIDEO_WIDTH },
-          height: { ideal: VIDEO_HEIGHT },
-          facingMode: { ideal: 'environment' },
-        },
-        audio: false,
-      });
-      if (cancelled) return;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: deviceId
+        ? { deviceId: { exact: deviceId }, width: { ideal: VIDEO_WIDTH }, height: { ideal: VIDEO_HEIGHT } }
+        : { width: { ideal: VIDEO_WIDTH }, height: { ideal: VIDEO_HEIGHT }, facingMode: { ideal: 'environment' } },
+      audio: false,
+    });
+
+    streamRef.current = stream;
+    if (videoRef.current) {
       videoRef.current.srcObject = stream;
       await videoRef.current.play();
     }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter((d) => d.kind === 'videoinput');
+      setVideoDevices(videoInputs);
+      const activeId = stream.getVideoTracks()[0]?.getSettings()?.deviceId ?? deviceId ?? videoInputs[0]?.deviceId ?? null;
+      setSelectedDeviceId(activeId);
+    } catch (err) {
+      console.warn('enumerateDevices failed (camera list unavailable)', err);
+    }
+  }, []);
+
+  const switchCamera = useCallback(
+    async (deviceId) => {
+      lastDetectionRef.current = null;
+      stableBoxRef.current = null;
+      try {
+        await startCamera(deviceId);
+      } catch (err) {
+        console.error('Failed to switch camera', err);
+      }
+    },
+    [startCamera]
+  );
+
+  // ---- load webcam + models in parallel (camera issues shouldn't block model loading) ----
+  useEffect(() => {
+    let cancelled = false;
 
     async function initModels() {
       try {
@@ -138,7 +191,7 @@ export default function App() {
 
     async function init() {
       try {
-        await Promise.all([initCamera(), initModels()]);
+        await Promise.all([startCamera(), initModels()]);
         if (cancelled) return;
         setLoadState('ready');
       } catch (err) {
@@ -154,9 +207,9 @@ export default function App() {
 
     return () => {
       cancelled = true;
-      if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
     };
-  }, []);
+  }, [startCamera]);
 
   const drawOverlay = useCallback((plasticBox, personBoxes, vetoed, extraLabel, nativeW, nativeH) => {
     const canvas = overlayRef.current;
@@ -234,9 +287,51 @@ export default function App() {
     }
   }, []);
 
-  const runPipeline = useCallback(
-    async (source, srcW, srcH) => {
-      const { personModel, plasticSession, resinSession, contamSession } = modelsRef.current;
+  // Stage 3/4 — runs exactly ONCE per snapshot, on the exact frame the video
+  // was paused on (drawImage against a paused <video> keeps returning that
+  // same static frame, so no separate capture step is needed). Wrapped
+  // end-to-end in try/catch, including the crop itself, so a bad box or a
+  // model failure is always logged and always surfaces in the UI — never
+  // silent.
+  const triggerSnapshot = useCallback(async (source, plasticBox) => {
+    if (snapshotActiveRef.current) return;
+    snapshotActiveRef.current = true;
+
+    videoRef.current?.pause();
+    setStatus('analyzing');
+    audio.playLockOn();
+
+    const { resinSession, contamSession } = modelsRef.current;
+    const analysisStart = performance.now();
+
+    try {
+      const cropped = cropAndResize(source, plasticBox);
+      const [resin, contamination] = await Promise.all([
+        classifyResin(resinSession, cropped),
+        classifyContamination(contamSession, cropped),
+      ]);
+      const rule = getDisposalRule(resin.label, contamination.label);
+      const lowConfidence = resin.confidence < CONFIDENCE_THRESHOLD || contamination.confidence < CONFIDENCE_THRESHOLD;
+
+      audio.playSuccess();
+      setResult({ resin, contamination, rule, box: plasticBox, simulated: false, lowConfidence });
+      setStatus('result');
+      setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - analysisStart) }));
+    } catch (err) {
+      console.error('[triggerSnapshot] Stage 3/4 analysis failed', err);
+      setStatus('classifier-error');
+      setResult(null);
+    }
+  }, []);
+
+  // Stage 1 (veto) + Stage 2 (YOLO/COCO box) — runs continuously and cheaply.
+  // Tracks how long the box has held roughly still (via IoU against the
+  // previous tick) and hands off to triggerSnapshot once it clears
+  // STABILITY_HOLD_MS. `immediateSnapshot` skips the stability wait for
+  // single-shot sources (an uploaded image has nothing to "hold steady").
+  const runTrackingPipeline = useCallback(
+    async (source, srcW, srcH, { immediateSnapshot = false } = {}) => {
+      const { personModel, plasticSession } = modelsRef.current;
       const tickStart = performance.now();
 
       const now = performance.now();
@@ -246,7 +341,6 @@ export default function App() {
       }
       lastTickAtRef.current = now;
 
-      setStatus('scanning');
       audio.playScanBeep();
 
       const [detections, plasticDetections] = await Promise.all([
@@ -271,11 +365,14 @@ export default function App() {
         }
       }
 
-      // No plastic found (Stage 2) — skip Stage 3/4 entirely and save the compute.
+      setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - tickStart) }));
+
+      // No plastic found — reset stability tracking, skip Stage 3/4.
       if (!plasticBox) {
+        stableBoxRef.current = null;
+        lockedRef.current = false;
         setStatus('no-item');
         setResult(null);
-        lockedRef.current = false;
         lastDetectionRef.current = {
           plasticBox: null,
           personBoxes,
@@ -284,75 +381,78 @@ export default function App() {
           nativeW: srcW,
           nativeH: srcH,
         };
-        setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - tickStart) }));
         return;
       }
 
       const vetoed = personBoxes.some((personBox) => overlapFraction(plasticBox, personBox) > PERSON_VETO_IOU);
 
-      // Cache immediately — the box is valid as soon as Stage 2 resolves,
-      // independent of whether Stage 3/4 classification below succeeds.
-      lastDetectionRef.current = {
-        plasticBox,
-        personBoxes,
-        vetoed,
-        extraLabel: usedFallback && !vetoed ? 'PLASTIC (fallback)' : undefined,
-        nativeW: srcW,
-        nativeH: srcH,
-      };
-
-      // Hand/person overlap veto — also skip Stage 3/4 here.
+      // Hand/person overlap veto — reset stability tracking, skip Stage 3/4.
       if (vetoed) {
+        stableBoxRef.current = null;
+        lockedRef.current = false;
         setStatus('veto');
         setResult(null);
-        lockedRef.current = false;
+        lastDetectionRef.current = { plasticBox, personBoxes, vetoed: true, extraLabel: undefined, nativeW: srcW, nativeH: srcH };
         if (now - lastVetoAudioRef.current > 1400) {
           audio.playVetoAlarm();
           lastVetoAudioRef.current = now;
         }
-        setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - tickStart) }));
         return;
       }
+
+      // Stability tracking: same object (high IoU vs. last tick) keeps the
+      // hold timer running; a new/jumped box resets it.
+      if (stableBoxRef.current && iou(plasticBox, stableBoxRef.current.box) > STABILITY_IOU_THRESHOLD) {
+        stableBoxRef.current.box = plasticBox;
+      } else {
+        stableBoxRef.current = { box: plasticBox, firstSeenAt: now };
+      }
+      const stableForMs = now - stableBoxRef.current.firstSeenAt;
+      const locking = stableForMs >= STABILITY_HOLD_MS * 0.4;
+
+      lastDetectionRef.current = {
+        plasticBox,
+        personBoxes,
+        vetoed: false,
+        extraLabel: usedFallback ? 'PLASTIC (fallback)' : locking ? 'LOCKING…' : undefined,
+        nativeW: srcW,
+        nativeH: srcH,
+      };
 
       if (!lockedRef.current) {
         audio.playLockOn();
         lockedRef.current = true;
       }
 
-      const cropped = cropAndResize(source, plasticBox);
-
-      let resin, contamination;
-      try {
-        [resin, contamination] = await Promise.all([
-          classifyResin(resinSession, cropped),
-          classifyContamination(contamSession, cropped),
-        ]);
-      } catch (err) {
-        console.error('Stage 3/4 classification failed', err);
-        setStatus('classifier-error');
-        setResult(null);
-        setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - tickStart) }));
-        return;
+      if (stableForMs >= STABILITY_HOLD_MS || immediateSnapshot) {
+        setStatus('locking');
+        triggerSnapshot(source, plasticBox);
+      } else {
+        setStatus('scanning');
       }
-
-      const rule = getDisposalRule(resin.label, contamination.label);
-
-      audio.playSuccess();
-      setResult({ resin, contamination, rule, box: plasticBox, simulated: false });
-      setStatus('result');
-      setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - tickStart) }));
     },
-    []
+    [triggerSnapshot]
   );
 
-  // ---- throttled inference loop (camera mode only) ----
-  // Polls at rAF cadence but only actually STARTS a pipeline run once both
-  // gates pass: isProcessingRef (previous run fully resolved — never
-  // overlap) AND the INFERENCE_INTERVAL_MS timestamp gate (never run more
-  // often than every ~250-300ms, regardless of how fast the device is).
-  // This loop only ever writes into lastDetectionRef; the separate render
-  // loop below is what actually draws, at full rAF rate, decoupled from
-  // this throttle.
+  const scanAgain = useCallback(() => {
+    snapshotActiveRef.current = false;
+    stableBoxRef.current = null;
+    lockedRef.current = false;
+    lastDetectionRef.current = null;
+    setResult(null);
+    setStatus('idle');
+    videoRef.current?.play();
+  }, []);
+
+  // ---- throttled Stage 1/2 tracking loop (camera mode only) ----
+  // Polls at rAF cadence but only actually STARTS a tracking pass once all
+  // gates pass: isProcessingRef (previous pass fully resolved — never
+  // overlap), the INFERENCE_INTERVAL_MS timestamp gate (never run more
+  // often than every ~250-300ms), AND snapshotActiveRef (a snapshot is
+  // being analyzed or its result is on screen — the video is paused, so
+  // there's nothing new to track until "Scan Again"). Stage 3/4 never runs
+  // from this loop; it only ever writes into lastDetectionRef, read by the
+  // separate render loop below.
   useEffect(() => {
     if (loadState !== 'ready' || sourceMode !== 'camera') return;
     let cancelled = false;
@@ -364,7 +464,7 @@ export default function App() {
       const nowTs = performance.now();
       const dueForInference = nowTs - lastInferenceAtRef.current >= INFERENCE_INTERVAL_MS;
 
-      if (isProcessingRef.current || !dueForInference) {
+      if (isProcessingRef.current || snapshotActiveRef.current || !dueForInference) {
         rafId = requestAnimationFrame(tick);
         return;
       }
@@ -378,7 +478,7 @@ export default function App() {
       lastInferenceAtRef.current = nowTs;
       isProcessingRef.current = true;
       try {
-        await runPipeline(video, video.videoWidth, video.videoHeight);
+        await runTrackingPipeline(video, video.videoWidth, video.videoHeight);
       } catch (err) {
         console.error('pipeline error', err);
       } finally {
@@ -393,7 +493,7 @@ export default function App() {
       cancelled = true;
       cancelAnimationFrame(rafId);
     };
-  }, [loadState, sourceMode, runPipeline]);
+  }, [loadState, sourceMode, runTrackingPipeline]);
 
   // ---- render loop: redraws the HUD overlay every frame from the cached
   // detection, fully decoupled from the throttled inference loop above.
@@ -437,7 +537,9 @@ export default function App() {
       if (cancelled) return;
       isProcessingRef.current = true;
       try {
-        await runPipeline(canvas, VIDEO_WIDTH, VIDEO_HEIGHT);
+        // A still image has nothing to "hold steady" — skip the stability
+        // wait and snapshot-analyze immediately if a box is found.
+        await runTrackingPipeline(canvas, VIDEO_WIDTH, VIDEO_HEIGHT, { immediateSnapshot: true });
       } catch (err) {
         console.error('pipeline error', err);
       } finally {
@@ -449,7 +551,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [sourceMode, uploadImg, loadState, runPipeline]);
+  }, [sourceMode, uploadImg, loadState, runTrackingPipeline]);
 
   // ---- auto-scroll + landed pulse when a new result lands ----
   useEffect(() => {
@@ -470,6 +572,8 @@ export default function App() {
     const img = new Image();
     img.onload = () => {
       lastDetectionRef.current = null;
+      stableBoxRef.current = null;
+      snapshotActiveRef.current = false;
       setSourceMode('upload');
       setUploadImg(img);
     };
@@ -478,6 +582,8 @@ export default function App() {
 
   const applyPreset = useCallback((preset) => {
     lastDetectionRef.current = null;
+    stableBoxRef.current = null;
+    snapshotActiveRef.current = false;
     setSourceMode('preset');
     setUploadImg(null);
     setStatus('scanning');
@@ -500,11 +606,14 @@ export default function App() {
 
   const returnToCamera = useCallback(() => {
     lastDetectionRef.current = null;
+    stableBoxRef.current = null;
+    snapshotActiveRef.current = false;
     setSourceMode('camera');
     setUploadImg(null);
     setStatus('idle');
     setResult(null);
     lockedRef.current = false;
+    videoRef.current?.play();
   }, []);
 
   const handleExport = useCallback(async () => {
@@ -576,6 +685,9 @@ export default function App() {
             onFiles={handleFiles}
             onPreset={applyPreset}
             onReturnToCamera={returnToCamera}
+            videoDevices={videoDevices}
+            selectedDeviceId={selectedDeviceId}
+            onSwitchCamera={switchCamera}
           />
         </section>
 
@@ -584,9 +696,15 @@ export default function App() {
             {status === 'veto' ? (
               <VetoAlert key="veto" />
             ) : status === 'classifier-error' ? (
-              <ClassifierErrorAlert key="classifier-error" />
+              <ClassifierErrorAlert key="classifier-error" onScanAgain={sourceMode === 'camera' ? scanAgain : undefined} />
             ) : status === 'result' && result ? (
-              <ResultCard key="result" result={result} onExport={handleExport} exporting={exporting} />
+              <ResultCard
+                key="result"
+                result={result}
+                onExport={handleExport}
+                exporting={exporting}
+                onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
+              />
             ) : (
               <EmptyPanel key="empty" status={status} />
             )}
@@ -653,7 +771,18 @@ function VideoHud({ containerRef, videoRef, overlayRef, uploadCanvasRef, loadSta
         style={{ display: sourceMode === 'preset' ? 'none' : 'block' }}
       />
 
-      {loadState === 'ready' && status !== 'veto' && sourceMode !== 'preset' && <div className="scan-line" />}
+      {loadState === 'ready' &&
+        status !== 'veto' &&
+        status !== 'analyzing' &&
+        status !== 'result' &&
+        sourceMode !== 'preset' && <div className="scan-line" />}
+
+      {(status === 'analyzing' || status === 'result') && sourceMode === 'camera' && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5 text-[10px] font-mono tracking-wide uppercase text-cyan-200 bg-slate-950/80 border border-cyan-500/30 rounded-full px-2.5 py-1 backdrop-blur-sm z-10">
+          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+          Frame captured
+        </div>
+      )}
 
       {status === 'result' && sourceMode !== 'preset' && (
         <svg className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-10 h-10 text-emerald-400/50 pointer-events-none crosshair-lock" viewBox="0 0 40 40">
@@ -704,7 +833,18 @@ function VideoHud({ containerRef, videoRef, overlayRef, uploadCanvasRef, loadSta
   );
 }
 
-function SourceControls({ sourceMode, onFiles, onPreset, onReturnToCamera }) {
+// Devices only get descriptive labels once permission has been granted; a
+// light heuristic upgrades generic labels to "Front/Back Camera" where the
+// browser's own label hints at it (common on phones), and falls back to a
+// numbered placeholder for devices with no label at all.
+function describeDevice(device, index) {
+  const label = device.label || `Camera ${index + 1}`;
+  if (/back|rear|environment/i.test(label)) return `Back Camera — ${label}`;
+  if (/front|user|facetime/i.test(label)) return `Front Camera — ${label}`;
+  return label;
+}
+
+function SourceControls({ sourceMode, onFiles, onPreset, onReturnToCamera, videoDevices, selectedDeviceId, onSwitchCamera }) {
   return (
     <div className="rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-4 space-y-3">
       <div className="flex items-center justify-between">
@@ -720,6 +860,23 @@ function SourceControls({ sourceMode, onFiles, onPreset, onReturnToCamera }) {
           </button>
         )}
       </div>
+
+      {sourceMode === 'camera' && videoDevices.length > 1 && (
+        <div className="relative">
+          <select
+            value={selectedDeviceId ?? ''}
+            onChange={(e) => onSwitchCamera(e.target.value)}
+            className="w-full appearance-none text-xs text-gray-300 bg-slate-800/60 border border-slate-700/50 hover:border-cyan-500/40 rounded-xl pl-3 pr-8 py-2.5 cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+          >
+            {videoDevices.map((device, i) => (
+              <option key={device.deviceId} value={device.deviceId}>
+                {describeDevice(device, i)}
+              </option>
+            ))}
+          </select>
+          <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-gray-500" />
+        </div>
+      )}
 
       <label className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 border border-dashed border-slate-700/60 hover:border-cyan-500/50 rounded-xl px-3 py-2.5 cursor-pointer transition-all duration-150 hover:scale-[1.01] active:scale-[0.99]">
         <Upload size={14} />
@@ -749,7 +906,9 @@ function SourceControls({ sourceMode, onFiles, onPreset, onReturnToCamera }) {
 function StatusBadge({ status, sourceMode }) {
   const config = {
     idle: { text: 'Idle', color: 'bg-slate-800/80 text-slate-300 border-slate-700/50', icon: Camera },
-    scanning: { text: sourceMode === 'preset' ? 'Simulating scan…' : 'Scanning…', color: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30', icon: ScanLine },
+    scanning: { text: sourceMode === 'preset' ? 'Simulating scan…' : 'Tracking…', color: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30', icon: ScanLine },
+    locking: { text: 'Holding steady — locking on…', color: 'bg-cyan-500/20 text-cyan-200 border-cyan-500/40', icon: Target },
+    analyzing: { text: 'Frame captured — analyzing resin & contamination…', color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30', icon: Loader2 },
     veto: {
       text: 'CONTAMINATION RISK: Biometric hand overlap detected',
       color: 'bg-red-500/20 text-red-300 border-red-500/40',
@@ -782,7 +941,7 @@ function StatusBadge({ status, sourceMode }) {
         transition={{ duration: 0.25 }}
         className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium backdrop-blur-sm ${config.color} ${showRadar ? 'pl-6' : ''}`}
       >
-        <Icon size={16} />
+        <Icon size={16} className={status === 'analyzing' ? 'animate-spin' : ''} />
         {config.text}
       </motion.div>
     </div>
@@ -864,8 +1023,12 @@ function ConfidenceRing({ label, value, ringClass = 'text-emerald-400' }) {
 function EmptyPanel({ status }) {
   const text =
     status === 'scanning'
-      ? 'Analyzing the frame…'
-      : 'Point the camera at a single plastic item, away from hands, or upload an image / try a demo preset to get a resin ID, contamination level, and disposal recommendation.';
+      ? 'Tracking the item — hold it steady for about 1.5 seconds to trigger a snapshot analysis.'
+      : status === 'locking'
+        ? 'Holding steady — locking on and about to capture a snapshot…'
+        : status === 'analyzing'
+          ? 'Frame captured. Running the resin and contamination models once on this snapshot…'
+          : 'Point the camera at a single plastic item, away from hands, or upload an image / try a demo preset to get a resin ID, contamination level, and disposal recommendation.';
 
   return (
     <motion.div
@@ -904,7 +1067,7 @@ function VetoAlert() {
   );
 }
 
-function ClassifierErrorAlert() {
+function ClassifierErrorAlert({ onScanAgain }) {
   return (
     <motion.div
       layout
@@ -912,24 +1075,33 @@ function ClassifierErrorAlert() {
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -10, scale: 0.97 }}
       transition={{ duration: 0.3 }}
-      className="rounded-2xl border border-amber-500/40 backdrop-blur-xl bg-amber-950/30 shadow-2xl shadow-amber-950/40 p-6"
+      className="rounded-2xl border border-amber-500/40 backdrop-blur-xl bg-amber-950/30 shadow-2xl shadow-amber-950/40 p-6 space-y-4"
     >
       <div className="flex items-start gap-3">
         <AlertTriangle className="text-amber-400 shrink-0 mt-0.5" size={22} />
         <div>
           <h2 className="text-amber-300 font-semibold">Resin/contamination classifier failed</h2>
           <p className="text-sm text-amber-200/80 mt-1">
-            Stage 2 (plastic detection) succeeded, but Stage 3/4 inference threw an error. Check the browser console for
-            the logged exception — the scan will retry automatically on the next frame.
+            Stage 2 (plastic detection) succeeded, but Stage 3/4 inference on the captured snapshot threw an error. Check
+            the browser console for the logged exception.
           </p>
         </div>
       </div>
+      {onScanAgain && (
+        <button
+          onClick={onScanAgain}
+          className="w-full flex items-center justify-center gap-2 text-xs font-medium rounded-xl border border-amber-500/30 hover:border-amber-400/50 hover:bg-amber-900/40 transition-all duration-150 hover:scale-[1.01] active:scale-[0.98] px-3 py-2.5 text-amber-200"
+        >
+          <RotateCcw size={14} />
+          Scan again
+        </button>
+      )}
     </motion.div>
   );
 }
 
-function ResultCard({ result, onExport, exporting }) {
-  const { resin, contamination, rule, simulated } = result;
+function ResultCard({ result, onExport, exporting, onScanAgain }) {
+  const { resin, contamination, rule, simulated, lowConfidence } = result;
   const info = RESIN_INFO[resin.label];
 
   return (
@@ -939,10 +1111,12 @@ function ResultCard({ result, onExport, exporting }) {
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -10, scale: 0.97 }}
       transition={{ duration: 0.3 }}
-      className="flicker-in rounded-2xl border border-emerald-500/30 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] shadow-emerald-950/30 p-6 space-y-5"
+      className={`flicker-in rounded-2xl backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-6 space-y-5 border ${
+        lowConfidence ? 'border-amber-500/30 shadow-amber-950/30' : 'border-emerald-500/30 shadow-emerald-950/30'
+      }`}
     >
       <div className="flex items-baseline justify-between">
-        <h2 className="text-lg font-semibold text-emerald-300">{resin.label}</h2>
+        <h2 className={`text-lg font-semibold ${lowConfidence ? 'text-amber-300' : 'text-emerald-300'}`}>{resin.label}</h2>
         <div className="flex items-center gap-2">
           {simulated && (
             <span className="text-[10px] uppercase tracking-wide text-cyan-300 border border-cyan-500/40 rounded-full px-2 py-0.5">
@@ -952,6 +1126,13 @@ function ResultCard({ result, onExport, exporting }) {
           <span className="text-xs text-gray-500">resin code {resin.code}</span>
         </div>
       </div>
+
+      {lowConfidence && (
+        <div className="flex items-center gap-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+          <AlertTriangle size={14} className="shrink-0" />
+          Below 80% confidence — consider rescanning with better lighting or a closer angle.
+        </div>
+      )}
 
       <div className="flex items-center justify-around gap-4 py-1">
         <ConfidenceRing label="Resin confidence" value={resin.confidence} ringClass="text-emerald-400" />
@@ -982,14 +1163,25 @@ function ResultCard({ result, onExport, exporting }) {
         <RuleRow label="Reuse suggestion" value={rule.reuse} />
       </div>
 
-      <button
-        onClick={onExport}
-        disabled={exporting}
-        className="w-full flex items-center justify-center gap-2 text-xs font-medium rounded-xl border border-slate-700/50 hover:border-emerald-500/40 hover:bg-slate-800/60 transition-all duration-150 hover:scale-[1.01] active:scale-[0.98] px-3 py-2.5 text-gray-300 disabled:opacity-50 disabled:hover:scale-100"
-      >
-        <Download size={14} />
-        {exporting ? 'Generating certificate…' : 'Export inspection audit'}
-      </button>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        {onScanAgain && (
+          <button
+            onClick={onScanAgain}
+            className="flex items-center justify-center gap-2 text-xs font-medium rounded-xl border border-cyan-500/30 hover:border-cyan-400/50 hover:bg-cyan-500/10 transition-all duration-150 hover:scale-[1.01] active:scale-[0.98] px-3 py-2.5 text-cyan-200"
+          >
+            <RotateCcw size={14} />
+            Scan again
+          </button>
+        )}
+        <button
+          onClick={onExport}
+          disabled={exporting}
+          className="flex items-center justify-center gap-2 text-xs font-medium rounded-xl border border-slate-700/50 hover:border-emerald-500/40 hover:bg-slate-800/60 transition-all duration-150 hover:scale-[1.01] active:scale-[0.98] px-3 py-2.5 text-gray-300 disabled:opacity-50 disabled:hover:scale-100"
+        >
+          <Download size={14} />
+          {exporting ? 'Generating…' : 'Export audit'}
+        </button>
+      </div>
     </motion.div>
   );
 }
