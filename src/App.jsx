@@ -89,10 +89,6 @@ export default function App() {
   const overlayRef = useRef(null);
   const frozenCanvasRef = useRef(null);
   const containerRef = useRef(null);
-  // Spans the result panel AND the disposal table — the shared html2canvas
-  // capture target for the "Export audit receipt" button, so the receipt
-  // includes both pieces, not just the Results Card in isolation.
-  const receiptZoneRef = useRef(null);
   const modelsRef = useRef(null);
   const streamRef = useRef(null);
   const isProcessingRef = useRef(false);
@@ -118,6 +114,9 @@ export default function App() {
   const [selectedDeviceId, setSelectedDeviceId] = useState(null);
 
   const appState = deriveAppState(status);
+  // Shared by both the visible ResultCard and the hidden export template
+  // below, so they never drift out of sync with the slider.
+  const currentRule = result ? getDisposalRule(result.resin.label, manualContamination) : null;
 
   useEffect(() => {
     audio.setMuted(muted);
@@ -568,11 +567,7 @@ export default function App() {
         </section>
 
         <section className="space-y-6">
-          <div
-            id="receipt-export-zone"
-            ref={receiptZoneRef}
-            className="bg-slate-950 p-6 rounded-xl flex flex-col gap-6 w-full max-w-3xl mx-auto"
-          >
+          <div className="bg-slate-950 p-6 rounded-xl flex flex-col gap-6 w-full max-w-3xl mx-auto">
             <AnimatePresence mode="wait">
               {status === 'veto' ? (
                 <VetoAlert key="veto" onScanAgain={sourceMode === 'camera' ? scanAgain : undefined} />
@@ -586,11 +581,10 @@ export default function App() {
                 <ResultCard
                   key="result"
                   result={result}
-                  rule={getDisposalRule(result.resin.label, manualContamination)}
+                  rule={currentRule}
                   contaminationLabel={manualContamination}
                   onContaminationChange={setManualContamination}
                   onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
-                  exportZoneRef={receiptZoneRef}
                 />
               ) : (
                 <EmptyPanel key="empty" status={status} />
@@ -608,6 +602,87 @@ export default function App() {
           </div>
         </section>
       </main>
+
+      {/* Hidden, fixed-width (800px), plain-inline-style receipt template —
+          deliberately NOT the responsive Tailwind UI above. html2canvas
+          renders CSS Color 4 (oklch) and complex responsive grid/flex rules
+          unreliably; this static, single-breakpoint layout sidesteps that
+          entirely and is what "Export audit receipt" actually captures. */}
+      {result && currentRule && (
+        <div
+          id="receipt-export-template"
+          style={{
+            position: 'absolute',
+            left: '-9999px',
+            top: '-9999px',
+            width: '800px',
+            backgroundColor: '#0f172a',
+            padding: '40px',
+            fontFamily: 'sans-serif',
+            color: '#f8fafc',
+            borderRadius: '12px',
+          }}
+        >
+          <div style={{ fontSize: '28px', fontWeight: 'bold' }}>Plastic Decoder Audit Receipt</div>
+          <div style={{ fontSize: '13px', color: '#94a3b8', marginTop: '4px' }}>
+            {new Date().toLocaleString()}
+          </div>
+
+          {result.frameDataUrl && (
+            <img
+              src={result.frameDataUrl}
+              alt="Captured item"
+              style={{
+                width: '100%',
+                height: '400px',
+                objectFit: 'contain',
+                backgroundColor: '#000',
+                borderRadius: '8px',
+                marginTop: '20px',
+              }}
+            />
+          )}
+
+          <div style={{ marginTop: '24px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <div style={{ fontSize: '22px', fontWeight: 'bold', color: '#34d399' }}>
+              Resin Type: {result.resin.label}
+            </div>
+            <div style={{ fontSize: '16px', color: '#cbd5e1' }}>
+              Contamination Level: {manualContamination}
+            </div>
+          </div>
+
+          <div
+            style={{
+              marginTop: '24px',
+              paddingTop: '20px',
+              borderTop: '1px solid #334155',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '16px',
+            }}
+          >
+            <div>
+              <div style={{ fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94a3b8' }}>
+                Action
+              </div>
+              <div style={{ fontSize: '15px', marginTop: '4px' }}>{currentRule.action}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94a3b8' }}>
+                Route
+              </div>
+              <div style={{ fontSize: '15px', marginTop: '4px' }}>{currentRule.route}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94a3b8' }}>
+                Reuse
+              </div>
+              <div style={{ fontSize: '15px', marginTop: '4px' }}>{currentRule.reuse}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <RuleDrawer rule={drawerRule} onClose={() => setDrawerRule(null)} />
     </div>
@@ -1071,38 +1146,38 @@ function ClassifierErrorAlert({ message, onScanAgain }) {
   );
 }
 
-function ResultCard({ result, rule, contaminationLabel, onContaminationChange, onScanAgain, exportZoneRef }) {
+function ResultCard({ result, rule, contaminationLabel, onContaminationChange, onScanAgain }) {
   const { resin, simulated, lowConfidence, frameDataUrl } = result;
   const info = RESIN_INFO[resin.label];
   const [exporting, setExporting] = useState(false);
 
-  // Renders the shared #receipt-export-zone (frozen frame, resin ID,
-  // disposal rule, AND the Stage 3 disposal table below it — not just this
-  // card in isolation) to a PNG via html2canvas and downloads it.
+  // Captures the hidden #receipt-export-template — a static, fixed-width,
+  // plain-inline-style layout built specifically for html2canvas — rather
+  // than any part of the live responsive Tailwind UI. html2canvas renders
+  // oklch() colors and responsive grid/flex rules unreliably; a dedicated
+  // off-screen template sidesteps that class of bug entirely.
   const handleExportReceipt = useCallback(async () => {
-    const zone = exportZoneRef?.current;
-    if (!zone || exporting) return;
+    if (exporting) return;
+    const receiptElement = document.getElementById('receipt-export-template');
+    if (!receiptElement) return;
     setExporting(true);
     try {
-      const canvas = await html2canvas(zone, {
-        scale: 3, // 3x resolution for crisp text in the exported PNG.
-        useCORS: true, // Don't taint the canvas on the embedded frame <img>.
-        backgroundColor: '#020617', // Solid slate-950 — never transparent/black.
-        windowWidth: zone.scrollWidth, // Render at the zone's real size, not
-        windowHeight: zone.scrollHeight, // a responsive-breakpoint guess, which is what was squashing it.
+      const canvas = await html2canvas(receiptElement, {
+        scale: 2,
+        backgroundColor: '#0f172a',
+        useCORS: true,
+        logging: false,
       });
-      const a = document.createElement('a');
-      a.href = canvas.toDataURL('image/png');
-      a.download = 'Scan-Audit-Receipt.png';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      const link = document.createElement('a');
+      link.download = `Scan-Receipt-${Date.now()}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
     } catch (err) {
       console.error('[ResultCard] receipt export failed', err);
     } finally {
       setExporting(false);
     }
-  }, [exporting, exportZoneRef]);
+  }, [exporting]);
 
   return (
     <motion.div
