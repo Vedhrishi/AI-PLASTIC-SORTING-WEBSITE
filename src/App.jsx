@@ -89,6 +89,10 @@ export default function App() {
   const overlayRef = useRef(null);
   const frozenCanvasRef = useRef(null);
   const containerRef = useRef(null);
+  // Spans the result panel AND the disposal table — the shared html2canvas
+  // capture target for the "Export audit receipt" button, so the receipt
+  // includes both pieces, not just the Results Card in isolation.
+  const receiptZoneRef = useRef(null);
   const modelsRef = useRef(null);
   const streamRef = useRef(null);
   const isProcessingRef = useRef(false);
@@ -564,37 +568,44 @@ export default function App() {
         </section>
 
         <section className="space-y-6">
-          <AnimatePresence mode="wait">
-            {status === 'veto' ? (
-              <VetoAlert key="veto" onScanAgain={sourceMode === 'camera' ? scanAgain : undefined} />
-            ) : status === 'classifier-error' ? (
-              <ClassifierErrorAlert
-                key="classifier-error"
-                message={classifierErrorMessage}
-                onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
-              />
-            ) : status === 'result' && result ? (
-              <ResultCard
-                key="result"
-                result={result}
-                rule={getDisposalRule(result.resin.label, manualContamination)}
-                contaminationLabel={manualContamination}
-                onContaminationChange={setManualContamination}
-                onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
-              />
-            ) : (
-              <EmptyPanel key="empty" status={status} />
-            )}
-          </AnimatePresence>
+          <div
+            id="receipt-export-zone"
+            ref={receiptZoneRef}
+            className="bg-slate-950 p-6 rounded-xl flex flex-col gap-6 w-full max-w-3xl mx-auto"
+          >
+            <AnimatePresence mode="wait">
+              {status === 'veto' ? (
+                <VetoAlert key="veto" onScanAgain={sourceMode === 'camera' ? scanAgain : undefined} />
+              ) : status === 'classifier-error' ? (
+                <ClassifierErrorAlert
+                  key="classifier-error"
+                  message={classifierErrorMessage}
+                  onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
+                />
+              ) : status === 'result' && result ? (
+                <ResultCard
+                  key="result"
+                  result={result}
+                  rule={getDisposalRule(result.resin.label, manualContamination)}
+                  contaminationLabel={manualContamination}
+                  onContaminationChange={setManualContamination}
+                  onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
+                  exportZoneRef={receiptZoneRef}
+                />
+              ) : (
+                <EmptyPanel key="empty" status={status} />
+              )}
+            </AnimatePresence>
 
-          <DisposalRuleTable
-            activeResin={result?.resin.label}
-            activeContamination={result ? manualContamination : undefined}
-            onSelectRow={setDrawerRule}
-            rowRefs={rowRefs}
-            landedRowKey={landedRowKey}
-            tableScrollRef={tableScrollRef}
-          />
+            <DisposalRuleTable
+              activeResin={result?.resin.label}
+              activeContamination={result ? manualContamination : undefined}
+              onSelectRow={setDrawerRule}
+              rowRefs={rowRefs}
+              landedRowKey={landedRowKey}
+              tableScrollRef={tableScrollRef}
+            />
+          </div>
         </section>
       </main>
 
@@ -1060,23 +1071,25 @@ function ClassifierErrorAlert({ message, onScanAgain }) {
   );
 }
 
-function ResultCard({ result, rule, contaminationLabel, onContaminationChange, onScanAgain }) {
+function ResultCard({ result, rule, contaminationLabel, onContaminationChange, onScanAgain, exportZoneRef }) {
   const { resin, simulated, lowConfidence, frameDataUrl } = result;
   const info = RESIN_INFO[resin.label];
-  const cardRef = useRef(null);
   const [exporting, setExporting] = useState(false);
 
-  // Renders the Results Card (frozen frame, resin ID, disposal rule) to a
-  // PNG via html2canvas and downloads it — a self-contained "session
-  // receipt" for pasting into a project report or evaluation rubric.
+  // Renders the shared #receipt-export-zone (frozen frame, resin ID,
+  // disposal rule, AND the Stage 3 disposal table below it — not just this
+  // card in isolation) to a PNG via html2canvas and downloads it.
   const handleExportReceipt = useCallback(async () => {
-    if (!cardRef.current || exporting) return;
+    const zone = exportZoneRef?.current;
+    if (!zone || exporting) return;
     setExporting(true);
     try {
-      const canvas = await html2canvas(cardRef.current, {
-        backgroundColor: '#0b0f1a',
-        scale: 2,
-        useCORS: true,
+      const canvas = await html2canvas(zone, {
+        scale: 3, // 3x resolution for crisp text in the exported PNG.
+        useCORS: true, // Don't taint the canvas on the embedded frame <img>.
+        backgroundColor: '#020617', // Solid slate-950 — never transparent/black.
+        windowWidth: zone.scrollWidth, // Render at the zone's real size, not
+        windowHeight: zone.scrollHeight, // a responsive-breakpoint guess, which is what was squashing it.
       });
       const a = document.createElement('a');
       a.href = canvas.toDataURL('image/png');
@@ -1089,12 +1102,11 @@ function ResultCard({ result, rule, contaminationLabel, onContaminationChange, o
     } finally {
       setExporting(false);
     }
-  }, [exporting]);
+  }, [exporting, exportZoneRef]);
 
   return (
     <motion.div
       layout
-      ref={cardRef}
       data-testid="result-panel"
       initial={{ opacity: 0, y: 20, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -1108,7 +1120,7 @@ function ResultCard({ result, rule, contaminationLabel, onContaminationChange, o
         <img
           src={frameDataUrl}
           alt="Captured item"
-          className="w-full aspect-[4/3] object-cover rounded-xl border border-slate-700/50"
+          className="w-full aspect-[4/3] object-contain bg-black rounded-xl border border-slate-700/50"
         />
       )}
 
