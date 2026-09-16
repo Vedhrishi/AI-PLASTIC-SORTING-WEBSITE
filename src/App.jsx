@@ -1117,6 +1117,13 @@ function ResultCard({ result, rule, contaminationLabel, onContaminationChange, o
         <RuleRow label="Reuse suggestion" value={rule.reuse} />
       </div>
 
+      {rule.note && (
+        <div className="flex items-start gap-2 text-xs text-cyan-200/80 bg-cyan-500/10 border border-cyan-500/25 rounded-lg px-3 py-2.5">
+          <span className="text-[9px] uppercase tracking-wide text-cyan-400 font-semibold shrink-0 mt-0.5">IN</span>
+          <span>{rule.note}</span>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {onScanAgain && (
           <button
@@ -1163,14 +1170,21 @@ function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowR
     <div className="rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-6">
       <h3 className="text-sm font-semibold mb-3 text-gray-300">Stage 3 disposal rules</h3>
       <div ref={tableScrollRef} className="max-h-80 overflow-y-auto overflow-x-auto rounded-lg">
-        <table className="w-full min-w-[640px] text-xs border-collapse">
+        <table className="w-full min-w-[820px] text-xs border-collapse">
+          <colgroup>
+            <col className="w-[8%]" />
+            <col className="w-[15%]" />
+            <col className="w-[16%]" />
+            <col className="w-[27%]" />
+            <col className="w-[34%]" />
+          </colgroup>
           <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-sm">
             <tr className="text-left text-gray-500">
               <th className="py-2 pr-3 whitespace-nowrap">Resin</th>
               <th className="py-2 pr-3 whitespace-nowrap">Contamination</th>
               <th className="py-2 pr-3 whitespace-nowrap">Action</th>
-              <th className="py-2 pr-3">Route</th>
-              <th className="py-2">Reuse</th>
+              <th className="py-2 pr-3">Recycling Route</th>
+              <th className="py-2 pr-3 text-cyan-400/80">Regional Note</th>
             </tr>
           </thead>
           <tbody>
@@ -1194,9 +1208,9 @@ function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowR
                   >
                     <td className="py-2.5 pr-3 align-top font-medium whitespace-nowrap">{resin}</td>
                     <td className="py-2.5 pr-3 align-top whitespace-nowrap">{contamination}</td>
-                    <td className="py-2.5 pr-3 align-top whitespace-nowrap">{rule.action}</td>
+                    <td className="py-2.5 pr-3 align-top">{rule.action}</td>
                     <td className="py-2.5 pr-3 align-top">{rule.route}</td>
-                    <td className="py-2.5 align-top">{rule.reuse}</td>
+                    <td className="py-2.5 pr-3 align-top text-cyan-200/70">{rule.note}</td>
                   </tr>
                 );
               })
@@ -1247,6 +1261,7 @@ function RuleDrawer({ rule, onClose }) {
               <DrawerField label="Recommended action" value={rule.action} />
               <DrawerField label="Recycling route" value={rule.route} />
               <DrawerField label="Reuse suggestion" value={rule.reuse} />
+              {rule.note && <DrawerField label="Regional note (India)" value={rule.note} />}
 
               {info && (
                 <>

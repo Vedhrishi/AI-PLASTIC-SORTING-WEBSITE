@@ -29,6 +29,7 @@ export async function buildInspectionCertificate(result, { simulated = false } =
       action: result.rule.action,
       recyclingRoute: result.rule.route,
       reuseSuggestion: result.rule.reuse,
+      regionalNote: result.rule.note ?? null,
     },
   };
 
