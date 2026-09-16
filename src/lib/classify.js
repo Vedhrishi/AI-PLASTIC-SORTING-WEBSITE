@@ -13,12 +13,6 @@ export const RESIN_CODES = {
   3: { code: 6, label: 'PS' },
 };
 
-export const CONTAMINATION_LABELS = {
-  0: 'Clean/Light Soiling',
-  1: 'Moderate Contamination',
-  2: 'Heavy Contamination',
-};
-
 // Crops [x1,y1,x2,y2] from `source` and resizes to 224x224, returns the canvas.
 export function cropAndResize(source, box) {
   const [x1, y1, x2, y2] = box;
@@ -124,17 +118,3 @@ export async function classifyResin(session, croppedCanvas) {
   }
 }
 
-export async function classifyContamination(session, croppedCanvas) {
-  let tensor;
-  try {
-    tensor = canvasToNormalizedTensor(croppedCanvas);
-    const inputName = session.inputNames[0];
-    const outputName = session.outputNames[0];
-    const results = await session.run({ [inputName]: tensor });
-    const { index, confidence } = softmaxArgmax(results[outputName].data);
-    return { label: CONTAMINATION_LABELS[index] ?? 'Unknown', level: index, confidence };
-  } catch (err) {
-    logInferenceFailure('classifyContamination', err, session, tensor);
-    throw err;
-  }
-}

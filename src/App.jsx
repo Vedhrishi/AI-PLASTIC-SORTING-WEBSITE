@@ -22,10 +22,10 @@ import {
 
 import { loadSession } from './lib/onnxSetup';
 import { detectPlastic } from './lib/yolo';
-import { classifyResin, classifyContamination, cropAndResize } from './lib/classify';
+import { classifyResin, cropAndResize } from './lib/classify';
 import { overlapFraction, computeCoverProjection, projectBox } from './lib/geometry';
 import { DISPOSAL_RULES, getDisposalRule } from './data/disposalRules';
-import { RESIN_INFO, CONTAMINATION_INFO } from './data/resinInfo';
+import { RESIN_INFO } from './data/resinInfo';
 import { buildInspectionCertificate, downloadCertificate } from './lib/audit';
 import * as audio from './lib/audioManager';
 
@@ -96,6 +96,10 @@ export default function App() {
   const [landedRowKey, setLandedRowKey] = useState(null);
   const [exporting, setExporting] = useState(false);
   const [classifierErrorMessage, setClassifierErrorMessage] = useState(null);
+  // Contamination is now a manual, user-controlled call — not a model
+  // output. Defaults to the cleanest state whenever a fresh resin result
+  // lands; the user can then move the 3-way slider freely.
+  const [manualContamination, setManualContamination] = useState('Clean/Light Soiling');
   const [videoDevices, setVideoDevices] = useState([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState(null);
 
@@ -164,18 +168,22 @@ export default function App() {
       }
       await tf.ready();
 
-      const [personModel, plasticSession, resinSession, contamSession] = await Promise.all([
+      const [personModel, plasticSession, resinSession] = await Promise.all([
         cocoSsd.load({ base: 'lite_mobilenet_v2' }),
         // YOLO is the heavy compute stage (640x640 input) — worth the GPU.
         loadSession('/models/best.onnx'),
-        // ResNet18 classifiers are small/fast on WASM alone; pinning them
-        // to WASM avoids WebGL op-coverage/precision edge cases silently
+        // ResNet18 classifier is small/fast on WASM alone; pinning it to
+        // WASM avoids WebGL op-coverage/precision edge cases silently
         // corrupting classification output on some mobile GPUs.
+        // Stage 4 (contamination-resnet18.onnx) is no longer loaded at all —
+        // contamination is now a manual user selection (see
+        // manualContamination state), not a model inference, so this heavy
+        // model download/init is dropped entirely for faster load and less
+        // memory/compute pressure on mobile.
         loadSession('/models/resin-resnet18.onnx', { executionProviders: ['wasm'] }),
-        loadSession('/models/contamination-resnet18.onnx', { executionProviders: ['wasm'] }),
       ]);
       if (cancelled) return;
-      modelsRef.current = { personModel, plasticSession, resinSession, contamSession };
+      modelsRef.current = { personModel, plasticSession, resinSession };
     }
 
     async function init() {
@@ -284,7 +292,7 @@ export default function App() {
       if (isProcessingRef.current) return;
       isProcessingRef.current = true;
 
-      const { personModel, plasticSession, resinSession, contamSession } = modelsRef.current;
+      const { personModel, plasticSession, resinSession } = modelsRef.current;
       const analysisStart = performance.now();
 
       setStatus('analyzing');
@@ -337,28 +345,25 @@ export default function App() {
         audio.playLockOn();
         const cropped = cropAndResize(canvas, plasticBox);
 
-        let resin, contamination;
+        let resin;
         try {
-          // Sequential, not Promise.all: onnxruntime-web's wasm backend
-          // shares one heap/module across sessions, so two concurrent
-          // session.run() calls can race and throw "Session already
-          // started".
           resin = await classifyResin(resinSession, cropped);
-          contamination = await classifyContamination(contamSession, cropped);
         } catch (err) {
           const message = err?.message ?? String(err);
-          console.error(`[analyzeSnapshot] Stage 3/4 failed: ${message}`, err);
+          console.error(`[analyzeSnapshot] Stage 3 failed: ${message}`, err);
           setStatus('classifier-error');
           setClassifierErrorMessage(message);
           setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - analysisStart) }));
           return;
         }
 
-        const rule = getDisposalRule(resin.label, contamination.label);
         const lowConfidence = resin.confidence < CONFIDENCE_THRESHOLD;
 
         audio.playSuccess();
-        setResult({ resin, contamination, rule, box: plasticBox, simulated: false, lowConfidence });
+        // Stage 4 is gone — contamination is a manual call, always starting
+        // from the cleanest state for a freshly-identified item.
+        setManualContamination('Clean/Light Soiling');
+        setResult({ resin, box: plasticBox, simulated: false, lowConfidence });
         setStatus('result');
         setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - analysisStart) }));
       } catch (err) {
@@ -393,6 +398,7 @@ export default function App() {
     isProcessingRef.current = false;
     setResult(null);
     setClassifierErrorMessage(null);
+    setManualContamination('Clean/Light Soiling');
     setStatus('idle');
     clearOverlay();
     if (sourceMode === 'camera') {
@@ -400,10 +406,12 @@ export default function App() {
     }
   }, [sourceMode, clearOverlay]);
 
-  // ---- auto-scroll + landed pulse when a new result lands ----
+  // ---- auto-scroll + landed pulse whenever the result OR the manually
+  // selected contamination level changes, so moving the slider re-highlights
+  // the newly-matching disposal table row every time. ----
   useEffect(() => {
     if (status !== 'result' || !result) return;
-    const key = `${result.resin.label}-${result.contamination.label}`;
+    const key = `${result.resin.label}-${manualContamination}`;
     const el = rowRefs.current[key];
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -411,7 +419,7 @@ export default function App() {
       const timeout = setTimeout(() => setLandedRowKey(null), 1200);
       return () => clearTimeout(timeout);
     }
-  }, [status, result]);
+  }, [status, result, manualContamination]);
 
   const handleFiles = useCallback(
     (files) => {
@@ -439,15 +447,17 @@ export default function App() {
     setStatus('analyzing');
     setResult(null);
     setTimeout(() => {
-      const rule = getDisposalRule(preset.resin, preset.contamination);
       audio.playLockOn();
       setTimeout(() => {
         audio.playSuccess();
+        // Presets keep their own designed contamination level (that's the
+        // point of "Soiled HDPE Jug" vs. "Clean PET Bottle") — the slider
+        // still overrides it freely afterward, same as a real scan.
+        setManualContamination(preset.contamination);
         setResult({
           resin: { label: preset.resin, code: preset.code, confidence: preset.resinConf },
-          contamination: { label: preset.contamination, level: CONTAMINATION_INFO[preset.contamination].index, confidence: preset.contamConf },
-          rule,
           simulated: true,
+          lowConfidence: preset.resinConf < CONFIDENCE_THRESHOLD,
         });
         setStatus('result');
       }, 400);
@@ -460,6 +470,7 @@ export default function App() {
     setStatus('idle');
     setResult(null);
     setClassifierErrorMessage(null);
+    setManualContamination('Clean/Light Soiling');
     clearOverlay();
     videoRef.current?.play();
   }, [clearOverlay]);
@@ -468,12 +479,20 @@ export default function App() {
     if (!result) return;
     setExporting(true);
     try {
-      const cert = await buildInspectionCertificate(result, { simulated: !!result.simulated });
+      const contaminationIndex = CONTAMINATION_ORDER.indexOf(manualContamination);
+      const cert = await buildInspectionCertificate(
+        {
+          resin: result.resin,
+          contamination: { label: manualContamination, level: contaminationIndex, confidence: 1, source: 'manual' },
+          rule: getDisposalRule(result.resin.label, manualContamination),
+        },
+        { simulated: !!result.simulated }
+      );
       downloadCertificate(cert);
     } finally {
       setExporting(false);
     }
-  }, [result]);
+  }, [result, manualContamination]);
 
   return (
     <div className="min-h-screen bg-[#05060a] text-gray-100" data-testid="app-root" data-load-state={loadState}>
@@ -556,6 +575,9 @@ export default function App() {
               <ResultCard
                 key="result"
                 result={result}
+                rule={getDisposalRule(result.resin.label, manualContamination)}
+                contaminationLabel={manualContamination}
+                onContaminationChange={setManualContamination}
                 onExport={handleExport}
                 exporting={exporting}
                 onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
@@ -567,7 +589,7 @@ export default function App() {
 
           <DisposalRuleTable
             activeResin={result?.resin.label}
-            activeContamination={result?.contamination.label}
+            activeContamination={result ? manualContamination : undefined}
             onSelectRow={setDrawerRule}
             rowRefs={rowRefs}
             landedRowKey={landedRowKey}
@@ -904,6 +926,50 @@ function ConfidenceRing({ label, value, ringClass = 'text-emerald-400', testId, 
   );
 }
 
+const CONTAMINATION_SLIDER_OPTIONS = [
+  { key: 'Clean/Light Soiling', short: 'Clean', bg: 'bg-emerald-400', glow: 'shadow-[0_0_18px_rgba(52,211,153,0.55)]', text: 'text-slate-950' },
+  { key: 'Moderate Contamination', short: 'Moderate', bg: 'bg-amber-400', glow: 'shadow-[0_0_18px_rgba(251,191,36,0.55)]', text: 'text-slate-950' },
+  { key: 'Heavy Contamination', short: 'Heavy', bg: 'bg-rose-400', glow: 'shadow-[0_0_18px_rgba(251,113,133,0.55)]', text: 'text-slate-950' },
+];
+
+// Manual 3-way contamination control — replaces the old Stage 4 ML gauge.
+// A shared framer-motion layoutId animates the colored highlight sliding
+// between segments instead of hand-rolled transform math.
+function ContaminationSlider({ value, onChange }) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between text-xs text-gray-400 mb-2">
+        <span className="uppercase tracking-wide">Contamination level</span>
+        <span className="text-[9px] uppercase tracking-wide text-gray-600">Manual</span>
+      </div>
+      <div data-testid="contamination-slider" className="grid grid-cols-3 gap-1 rounded-xl border border-slate-700/50 bg-slate-800/40 p-1">
+        {CONTAMINATION_SLIDER_OPTIONS.map((opt) => {
+          const active = value === opt.key;
+          return (
+            <button
+              key={opt.key}
+              type="button"
+              data-testid={`contamination-option-${opt.short.toLowerCase()}`}
+              aria-pressed={active}
+              onClick={() => onChange(opt.key)}
+              className="relative py-2.5 text-xs font-semibold rounded-lg transition-colors"
+            >
+              {active && (
+                <motion.span
+                  layoutId="contamination-highlight"
+                  className={`absolute inset-0 rounded-lg ${opt.bg} ${opt.glow}`}
+                  transition={{ type: 'spring', stiffness: 500, damping: 32 }}
+                />
+              )}
+              <span className={`relative z-10 ${active ? opt.text : 'text-gray-400 hover:text-gray-200'}`}>{opt.short}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function EmptyPanel({ status }) {
   const text =
     status === 'analyzing'
@@ -994,8 +1060,8 @@ function ClassifierErrorAlert({ message, onScanAgain }) {
   );
 }
 
-function ResultCard({ result, onExport, exporting, onScanAgain }) {
-  const { resin, contamination, rule, simulated, lowConfidence } = result;
+function ResultCard({ result, rule, contaminationLabel, onContaminationChange, onExport, exporting, onScanAgain }) {
+  const { resin, simulated, lowConfidence } = result;
   const info = RESIN_INFO[resin.label];
 
   return (
@@ -1031,22 +1097,11 @@ function ResultCard({ result, onExport, exporting, onScanAgain }) {
         </div>
       )}
 
-      <div className="flex items-center justify-around gap-4 py-1">
+      <div className="flex items-center justify-center py-1">
         <ConfidenceRing label="Resin confidence" value={resin.confidence} ringClass="text-emerald-400" testId="result-resin-confidence" />
-        <ConfidenceRing
-          label={contamination.label}
-          value={contamination.confidence}
-          ringClass={
-            contamination.level === 0
-              ? 'text-emerald-400'
-              : contamination.level === 1
-                ? 'text-amber-400'
-                : 'text-red-400'
-          }
-          testId="result-contamination-confidence"
-          labelTestId="result-contamination"
-        />
       </div>
+
+      <ContaminationSlider value={contaminationLabel} onChange={onContaminationChange} />
 
       {info && (
         <div className="grid grid-cols-3 gap-2 text-center">

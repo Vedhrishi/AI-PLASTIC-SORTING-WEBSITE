@@ -23,6 +23,7 @@ export async function buildInspectionCertificate(result, { simulated = false } =
       level: result.contamination.label,
       index: result.contamination.level,
       confidence: Number((result.contamination.confidence * 100).toFixed(1)),
+      source: result.contamination.source ?? 'model',
     },
     directive: {
       action: result.rule.action,
