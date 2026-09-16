@@ -1,88 +1,75 @@
-// Stage 3 disposal rules — localized to the Indian Plastic Waste Management
-// (PWM) context: informal kabadiwala resale economics, mechanical/chemical
-// recycling routes actually available domestically, and PWM-rule-driven
-// end-of-life routing (cement-kiln co-processing rather than landfill for
-// non-recyclables). Keyed the same way as before: resin -> contamination
-// tier -> { action, route, reuse, note }.
+// Stage 3 disposal rules — Indian Plastic Waste Management (PWM) context.
+// Keyed the same way throughout the app: resin -> contamination tier ->
+// { action, route, reuse }. Resin keys use the app's canonical labels
+// (HDPE, matching classify.js's RESIN_CODES output) rather than the ISO
+// "PE-HD" designation from the source dataset.
 export const DISPOSAL_RULES = {
   PET: {
     'Clean/Light Soiling': {
-      action: 'Recycle - quick rinse first',
+      action: 'Recycle - give it a quick rinse first if any residue is visible',
       route: 'Mechanical (bottle-to-bottle / fiber)',
-      reuse: 'Rinsed planter, storage container',
-      note: 'High kabadiwala demand, Rs 8-15/kg. Rinsed items fetch full value.',
+      reuse: 'Rinsed planter, storage container, craft/DIY reuse',
     },
     'Moderate Contamination': {
       action: 'Recycle if cleaned; otherwise divert',
-      route: 'Wash-then-mechanical; glycolysis chemical recycling where available',
-      reuse: 'Not recommended (food-contact safety uncertain)',
-      note: 'Informal-sector resale value drops sharply once soiled.',
+      route: 'Wash-then-mechanical; PET is a poor pyrolysis feedstock so chemical recycling route is glycolysis',
+      reuse: 'Not recommended (food-contact safety uncertain once soiled)',
     },
     'Heavy Contamination': {
-      action: 'Dispose (non-recyclable)',
-      route: 'Cement-kiln co-processing (AFR) or road-construction bitumen mix',
+      action: 'Dispose (non-recyclable at this tier)',
+      route: 'Cement-kiln co-processing (AFR) or shredded into road-construction bitumen mix',
       reuse: 'Not recommended',
-      note: 'Not purchased by kabadiwala; PWM rules route non-recyclables to co-processing, not landfill.',
     },
   },
   HDPE: {
     'Clean/Light Soiling': {
-      action: 'Recycle - quick rinse first',
-      route: 'Mechanical (pipes/buckets/tiles)',
-      reuse: 'Rinsed planter, storage bin',
-      note: 'High kabadiwala demand, Rs 10-18/kg. Tolerates more handling than PET.',
+      action: 'Recycle - give it a quick rinse first if any residue is visible',
+      route: 'Mechanical (bottle-to-bottle, or downcycled to pipes/buckets/tiles)',
+      reuse: 'Rinsed planter, storage bin, bird feeder',
     },
     'Moderate Contamination': {
       action: 'Recycle if cleaned; otherwise divert',
-      route: 'Wash-then-mechanical; good pyrolysis feedstock',
+      route: 'Wash-then-mechanical; good pyrolysis feedstock (olefin) where capacity exists',
       reuse: 'Not recommended',
-      note: 'Value drops but less steeply than PET at this tier.',
     },
     'Heavy Contamination': {
-      action: 'Dispose (non-recyclable)',
+      action: 'Dispose (non-recyclable at this tier)',
       route: 'Cement-kiln co-processing or road-construction mix',
       reuse: 'Not recommended',
-      note: 'Not purchased by kabadiwala at this tier.',
     },
   },
   PP: {
     'Clean/Light Soiling': {
-      action: 'Recycle after quick rinse',
-      route: 'Mechanical (storage bins, auto parts)',
-      reuse: 'Microwave-safe storage box, bird feeder',
-      note: 'Lower informal uptake than PET/HDPE; collection infrastructure thinner.',
+      action: 'Recycle after a quick rinse where collection exists, else prefer reuse',
+      route: 'Mechanical (storage bins, auto parts, pallets)',
+      reuse: 'Microwave-safe storage box, bird feeder (sturdy, reusable)',
     },
     'Moderate Contamination': {
-      action: 'Prefer reuse over recycling',
-      route: 'Wash-then-mechanical is economically marginal',
-      reuse: 'Favor reuse suggestion over recycle',
-      note: 'PP recycling is a 5-step process; contamination raises cost disproportionately.',
+      action: 'Prefer reuse over recycling; dispose if neither applies',
+      route: 'Wash-then-mechanical is economically marginal at this tier',
+      reuse: 'Favor reuse suggestion over recycle at this tier',
     },
     'Heavy Contamination': {
-      action: 'Dispose (non-recyclable)',
-      route: 'Cement-kiln co-processing',
+      action: 'Dispose (non-recyclable at this tier)',
+      route: 'Cement-kiln co-processing or road-construction mix',
       reuse: 'Not recommended',
-      note: 'Not purchased by kabadiwala at this tier.',
     },
   },
   PS: {
     'Clean/Light Soiling': {
-      action: 'Recycle only if local buyer exists',
-      route: 'Mechanical recycling rarely available',
-      reuse: 'Non-food reuse only (storage)',
-      note: 'EPS/foam and SUP-listed PS items banned in India since July 2022. Rigid PS rarely accepted by MRFs.',
+      action: 'Recycle only if a regional buyer exists, else reuse cautiously or dispose',
+      route: 'Mechanical recycling technically possible but rarely available in practice',
+      reuse: 'Non-food reuse only (storage) - avoid food reuse given brittleness',
     },
     'Moderate Contamination': {
-      action: 'Dispose',
+      action: 'Dispose (recycling unlikely to find a buyer at this tier)',
       route: 'Cement-kiln co-processing preferred over landfill',
       reuse: 'Not recommended',
-      note: 'If item matches banned SUP-PS category, flag as banned.',
     },
     'Heavy Contamination': {
-      action: 'Dispose',
+      action: 'Dispose (non-recyclable)',
       route: 'Cement-kiln co-processing or waste-to-energy',
       reuse: 'Not recommended',
-      note: 'SUP-listed PS items banned in India since July 2022, regardless of contamination.',
     },
   },
 };
@@ -93,7 +80,6 @@ export function getDisposalRule(resinLabel, contaminationLabel) {
       action: 'Unknown',
       route: 'Manual inspection required',
       reuse: 'Unknown',
-      note: '—',
     }
   );
 }

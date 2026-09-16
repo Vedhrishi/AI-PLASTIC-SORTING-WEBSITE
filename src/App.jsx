@@ -2,6 +2,12 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 import * as tf from '@tensorflow/tfjs';
 import { AnimatePresence, motion } from 'framer-motion';
+// html2canvas-pro, not html2canvas: Tailwind v4's default palette emits
+// oklch()/oklab() colors, which stock html2canvas (last released for the
+// pre-CSS-Color-4 web) cannot parse — every capture throws
+// "unsupported color function". This fork is API-compatible and adds that
+// support, which is the actual fix rather than a workaround.
+import html2canvas from 'html2canvas-pro';
 import {
   Camera,
   AlertTriangle,
@@ -26,7 +32,6 @@ import { classifyResin, cropAndResize } from './lib/classify';
 import { overlapFraction, computeCoverProjection, projectBox } from './lib/geometry';
 import { DISPOSAL_RULES, getDisposalRule } from './data/disposalRules';
 import { RESIN_INFO } from './data/resinInfo';
-import { buildInspectionCertificate, downloadCertificate } from './lib/audit';
 import * as audio from './lib/audioManager';
 
 const VIDEO_WIDTH = 640;
@@ -94,7 +99,6 @@ export default function App() {
   const [isDragActive, setIsDragActive] = useState(false);
   const [diagnostics, setDiagnostics] = useState({ latencyMs: 0, engine: 'ONNX Runtime Web · WebGL (GPU) → WASM' });
   const [landedRowKey, setLandedRowKey] = useState(null);
-  const [exporting, setExporting] = useState(false);
   const [classifierErrorMessage, setClassifierErrorMessage] = useState(null);
   // Contamination is now a manual, user-controlled call — not a model
   // output. Defaults to the cleanest state whenever a fresh resin result
@@ -363,7 +367,15 @@ export default function App() {
         // Stage 4 is gone — contamination is a manual call, always starting
         // from the cleanest state for a freshly-identified item.
         setManualContamination('Clean/Light Soiling');
-        setResult({ resin, box: plasticBox, simulated: false, lowConfidence });
+        setResult({
+          resin,
+          box: plasticBox,
+          simulated: false,
+          lowConfidence,
+          // Included in the Results Card so the visual receipt export
+          // (html2canvas) captures the actual analyzed frame, not just text.
+          frameDataUrl: canvas.toDataURL('image/jpeg', 0.85),
+        });
         setStatus('result');
         setDiagnostics((d) => ({ ...d, latencyMs: Math.round(performance.now() - analysisStart) }));
       } catch (err) {
@@ -475,25 +487,6 @@ export default function App() {
     videoRef.current?.play();
   }, [clearOverlay]);
 
-  const handleExport = useCallback(async () => {
-    if (!result) return;
-    setExporting(true);
-    try {
-      const contaminationIndex = CONTAMINATION_ORDER.indexOf(manualContamination);
-      const cert = await buildInspectionCertificate(
-        {
-          resin: result.resin,
-          contamination: { label: manualContamination, level: contaminationIndex, confidence: 1, source: 'manual' },
-          rule: getDisposalRule(result.resin.label, manualContamination),
-        },
-        { simulated: !!result.simulated }
-      );
-      downloadCertificate(cert);
-    } finally {
-      setExporting(false);
-    }
-  }, [result, manualContamination]);
-
   return (
     <div className="min-h-screen bg-[#05060a] text-gray-100" data-testid="app-root" data-load-state={loadState}>
       <header className="border-b border-slate-800/60 backdrop-blur-xl bg-slate-950/40 px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between gap-2 sm:gap-3 sticky top-0 z-30">
@@ -578,8 +571,6 @@ export default function App() {
                 rule={getDisposalRule(result.resin.label, manualContamination)}
                 contaminationLabel={manualContamination}
                 onContaminationChange={setManualContamination}
-                onExport={handleExport}
-                exporting={exporting}
                 onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
               />
             ) : (
@@ -1060,13 +1051,41 @@ function ClassifierErrorAlert({ message, onScanAgain }) {
   );
 }
 
-function ResultCard({ result, rule, contaminationLabel, onContaminationChange, onExport, exporting, onScanAgain }) {
-  const { resin, simulated, lowConfidence } = result;
+function ResultCard({ result, rule, contaminationLabel, onContaminationChange, onScanAgain }) {
+  const { resin, simulated, lowConfidence, frameDataUrl } = result;
   const info = RESIN_INFO[resin.label];
+  const cardRef = useRef(null);
+  const [exporting, setExporting] = useState(false);
+
+  // Renders the Results Card (frozen frame, resin ID, disposal rule) to a
+  // PNG via html2canvas and downloads it — a self-contained "session
+  // receipt" for pasting into a project report or evaluation rubric.
+  const handleExportReceipt = useCallback(async () => {
+    if (!cardRef.current || exporting) return;
+    setExporting(true);
+    try {
+      const canvas = await html2canvas(cardRef.current, {
+        backgroundColor: '#0b0f1a',
+        scale: 2,
+        useCORS: true,
+      });
+      const a = document.createElement('a');
+      a.href = canvas.toDataURL('image/png');
+      a.download = 'Scan-Audit-Receipt.png';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      console.error('[ResultCard] receipt export failed', err);
+    } finally {
+      setExporting(false);
+    }
+  }, [exporting]);
 
   return (
     <motion.div
       layout
+      ref={cardRef}
       data-testid="result-panel"
       initial={{ opacity: 0, y: 20, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -1076,6 +1095,14 @@ function ResultCard({ result, rule, contaminationLabel, onContaminationChange, o
         lowConfidence ? 'border-amber-500/30 shadow-amber-950/30' : 'border-emerald-500/30 shadow-emerald-950/30'
       }`}
     >
+      {frameDataUrl && (
+        <img
+          src={frameDataUrl}
+          alt="Captured item"
+          className="w-full aspect-[4/3] object-cover rounded-xl border border-slate-700/50"
+        />
+      )}
+
       <div className="flex items-baseline justify-between">
         <h2 data-testid="result-resin" data-resin-code={resin.code} className={`text-lg font-semibold ${lowConfidence ? 'text-amber-300' : 'text-emerald-300'}`}>
           {resin.label}
@@ -1117,13 +1144,6 @@ function ResultCard({ result, rule, contaminationLabel, onContaminationChange, o
         <RuleRow label="Reuse suggestion" value={rule.reuse} />
       </div>
 
-      {rule.note && (
-        <div className="flex items-start gap-2 text-xs text-cyan-200/80 bg-cyan-500/10 border border-cyan-500/25 rounded-lg px-3 py-2.5">
-          <span className="text-[9px] uppercase tracking-wide text-cyan-400 font-semibold shrink-0 mt-0.5">IN</span>
-          <span>{rule.note}</span>
-        </div>
-      )}
-
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {onScanAgain && (
           <button
@@ -1135,12 +1155,12 @@ function ResultCard({ result, rule, contaminationLabel, onContaminationChange, o
           </button>
         )}
         <button
-          onClick={onExport}
+          onClick={handleExportReceipt}
           disabled={exporting}
           className="flex items-center justify-center gap-2 text-xs font-medium rounded-xl border border-slate-700/50 hover:border-emerald-500/40 hover:bg-slate-800/60 transition-all duration-150 hover:scale-[1.01] active:scale-[0.98] px-3 py-2.5 text-gray-300 disabled:opacity-50 disabled:hover:scale-100"
         >
           <Download size={14} />
-          {exporting ? 'Generating…' : 'Export audit'}
+          {exporting ? 'Capturing…' : 'Export audit receipt'}
         </button>
       </div>
     </motion.div>
@@ -1170,21 +1190,21 @@ function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowR
     <div className="rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-6">
       <h3 className="text-sm font-semibold mb-3 text-gray-300">Stage 3 disposal rules</h3>
       <div ref={tableScrollRef} className="max-h-80 overflow-y-auto overflow-x-auto rounded-lg">
-        <table className="w-full min-w-[820px] text-xs border-collapse">
+        <table className="w-full min-w-[760px] text-sm border-collapse">
           <colgroup>
-            <col className="w-[8%]" />
-            <col className="w-[15%]" />
+            <col className="w-[9%]" />
             <col className="w-[16%]" />
+            <col className="w-[22%]" />
             <col className="w-[27%]" />
-            <col className="w-[34%]" />
+            <col className="w-[26%]" />
           </colgroup>
           <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-sm">
-            <tr className="text-left text-gray-500">
-              <th className="py-2 pr-3 whitespace-nowrap">Resin</th>
-              <th className="py-2 pr-3 whitespace-nowrap">Contamination</th>
-              <th className="py-2 pr-3 whitespace-nowrap">Action</th>
-              <th className="py-2 pr-3">Recycling Route</th>
-              <th className="py-2 pr-3 text-cyan-400/80">Regional Note</th>
+            <tr className="text-left text-slate-500">
+              <th className="p-3 whitespace-nowrap">Resin</th>
+              <th className="p-3 whitespace-nowrap">Contamination</th>
+              <th className="p-3">Action</th>
+              <th className="p-3">Route</th>
+              <th className="p-3">Reuse</th>
             </tr>
           </thead>
           <tbody>
@@ -1203,14 +1223,14 @@ function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowR
                     className={`border-t border-slate-800/60 cursor-pointer transition-all duration-200 hover:scale-[1.01] active:scale-[0.995] hover:bg-slate-800/60 ${
                       isActive
                         ? 'bg-emerald-500/10 text-emerald-300 ring-2 ring-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.3)]'
-                        : 'text-gray-400'
+                        : 'text-slate-300'
                     } ${landedRowKey === key ? 'row-land' : ''}`}
                   >
-                    <td className="py-2.5 pr-3 align-top font-medium whitespace-nowrap">{resin}</td>
-                    <td className="py-2.5 pr-3 align-top whitespace-nowrap">{contamination}</td>
-                    <td className="py-2.5 pr-3 align-top">{rule.action}</td>
-                    <td className="py-2.5 pr-3 align-top">{rule.route}</td>
-                    <td className="py-2.5 pr-3 align-top text-cyan-200/70">{rule.note}</td>
+                    <td className="p-3 align-top text-left font-medium whitespace-nowrap">{resin}</td>
+                    <td className="p-3 align-top text-left whitespace-normal break-words">{contamination}</td>
+                    <td className="p-3 align-top text-left whitespace-normal break-words">{rule.action}</td>
+                    <td className="p-3 align-top text-left whitespace-normal break-words">{rule.route}</td>
+                    <td className="p-3 align-top text-left whitespace-normal break-words">{rule.reuse}</td>
                   </tr>
                 );
               })
@@ -1261,7 +1281,6 @@ function RuleDrawer({ rule, onClose }) {
               <DrawerField label="Recommended action" value={rule.action} />
               <DrawerField label="Recycling route" value={rule.route} />
               <DrawerField label="Reuse suggestion" value={rule.reuse} />
-              {rule.note && <DrawerField label="Regional note (India)" value={rule.note} />}
 
               {info && (
                 <>
