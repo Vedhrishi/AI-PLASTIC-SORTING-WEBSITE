@@ -39,6 +39,12 @@ const VIDEO_HEIGHT = 480;
 const PERSON_VETO_IOU = 0.2;
 const YOLO_FALLBACK_MIN_SCORE = 0.3;
 const CONFIDENCE_THRESHOLD = 0.8;
+// Stage 2 (YOLOv8) score gate. Kept low so heavily crushed/deformed items —
+// which produce weaker, less bottle-shaped activations — still clear the
+// bar and reach Stage 3, where ResNet's texture-based classification is
+// more robust to deformation than YOLO's shape-based detection.
+const YOLO_CONFIDENCE_THRESHOLD = 0.25;
+const YOLO_NMS_IOU_THRESHOLD = 0.45;
 
 const RESIN_ORDER = ['PET', 'HDPE', 'PP', 'PS'];
 const CONTAMINATION_ORDER = ['Clean/Light Soiling', 'Moderate Contamination', 'Heavy Contamination'];
@@ -307,7 +313,10 @@ export default function App() {
       try {
         const [detections, plasticDetections] = await Promise.all([
           personModel.detect(canvas),
-          detectPlastic(plasticSession, canvas, VIDEO_WIDTH, VIDEO_HEIGHT, { confThreshold: 0.4 }),
+          detectPlastic(plasticSession, canvas, VIDEO_WIDTH, VIDEO_HEIGHT, {
+            confThreshold: YOLO_CONFIDENCE_THRESHOLD,
+            iouThreshold: YOLO_NMS_IOU_THRESHOLD,
+          }),
         ]);
 
         const personBoxes = detections

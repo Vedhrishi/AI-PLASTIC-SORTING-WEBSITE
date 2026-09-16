@@ -46,7 +46,12 @@ export function canvasToCHWTensor(canvas) {
 // [1, 4 + numClasses, numBoxes] (cx, cy, w, h, class scores...).
 // Returns boxes in the ORIGINAL (srcW x srcH) coordinate space.
 export function decodeYoloOutput(outputTensor, srcW, srcH, letterboxInfo, opts = {}) {
-  const { confThreshold = 0.4, iouThreshold = 0.45 } = opts;
+  // 0.25 (not the previous 0.4): heavily crushed/deformed plastic items
+  // produce weaker, less bottle-shaped activations, so the higher threshold
+  // was silently dropping valid detections before they ever reached Stage 3.
+  // NMS IoU stays at 0.45 to still collapse duplicate/overlapping boxes now
+  // that more lower-confidence candidates survive the score gate.
+  const { confThreshold = 0.25, iouThreshold = 0.45 } = opts;
   const dims = outputTensor.dims; // [1, C, N]
   const C = dims[1];
   const N = dims[2];
