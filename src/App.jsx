@@ -1160,7 +1160,7 @@ function ClassifierErrorAlert({ message, onScanAgain }) {
 }
 
 function ResultCard({ result, rule, contaminationLabel, onContaminationChange, onScanAgain }) {
-  const { resin, simulated, lowConfidence, frameDataUrl } = result;
+  const { resin, simulated, lowConfidence } = result;
   const info = RESIN_INFO[resin.label];
   const [exporting, setExporting] = useState(false);
 
@@ -1204,14 +1204,6 @@ function ResultCard({ result, rule, contaminationLabel, onContaminationChange, o
         lowConfidence ? 'border-amber-500/30 shadow-amber-950/30' : 'border-emerald-500/30 shadow-emerald-950/30'
       }`}
     >
-      {frameDataUrl && (
-        <img
-          src={frameDataUrl}
-          alt="Captured item"
-          className="w-full aspect-[4/3] object-contain bg-black rounded-xl border border-slate-700/50"
-        />
-      )}
-
       <div className="flex items-baseline justify-between">
         <h2 data-testid="result-resin" data-resin-code={resin.code} className={`text-lg font-semibold ${lowConfidence ? 'text-amber-300' : 'text-emerald-300'}`}>
           {resin.label}
