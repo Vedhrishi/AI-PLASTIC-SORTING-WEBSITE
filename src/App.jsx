@@ -500,7 +500,7 @@ export default function App() {
   }, [clearOverlay]);
 
   return (
-    <div className="min-h-screen bg-[#05060a] text-gray-100" data-testid="app-root" data-load-state={loadState}>
+    <div className="min-h-screen bg-[#05060a] text-gray-100 print:bg-white print:text-black" data-testid="app-root" data-load-state={loadState}>
       <header className="border-b border-slate-800/60 backdrop-blur-xl bg-slate-950/40 px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between gap-2 sm:gap-3 sticky top-0 z-30">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <div className="relative shrink-0">
@@ -532,8 +532,8 @@ export default function App() {
         </button>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 grid gap-6 sm:gap-8 lg:grid-cols-[640px_1fr]">
-        <section className="space-y-4">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 grid grid-cols-1 xl:grid-cols-[640px_1fr] gap-6">
+        <section className="space-y-4 min-w-0">
           <VideoHud
             containerRef={containerRef}
             videoRef={videoRef}
@@ -566,7 +566,7 @@ export default function App() {
           />
         </section>
 
-        <section className="space-y-6">
+        <section className="space-y-6 min-w-0">
           <div className="bg-slate-950 p-6 rounded-xl flex flex-col gap-6 w-full max-w-3xl mx-auto">
             <AnimatePresence mode="wait">
               {status === 'veto' ? (
@@ -1283,10 +1283,10 @@ function RuleRow({ label, value }) {
 
 function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowRefs, landedRowKey, tableScrollRef }) {
   return (
-    <div className="rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-6">
+    <div className="rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-6 print:break-inside-avoid">
       <h3 className="text-sm font-semibold mb-3 text-gray-300">Stage 3 disposal rules</h3>
       <div ref={tableScrollRef} className="max-h-80 overflow-y-auto overflow-x-auto rounded-lg">
-        <table className="w-full min-w-[760px] text-sm border-collapse">
+        <table className="w-full text-sm border-collapse">
           <colgroup>
             <col className="w-[9%]" />
             <col className="w-[16%]" />
@@ -1296,11 +1296,11 @@ function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowR
           </colgroup>
           <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-sm">
             <tr className="text-left text-slate-500">
-              <th className="p-3 whitespace-nowrap">Resin</th>
-              <th className="p-3 whitespace-nowrap">Contamination</th>
-              <th className="p-3">Action</th>
-              <th className="p-3">Route</th>
-              <th className="p-3">Reuse</th>
+              <th className="p-3 sm:px-3 sm:py-2 whitespace-nowrap">Resin</th>
+              <th className="p-3 sm:px-3 sm:py-2 whitespace-nowrap">Contamination</th>
+              <th className="p-3 sm:px-3 sm:py-2">Action</th>
+              <th className="p-3 sm:px-3 sm:py-2">Route</th>
+              <th className="p-3 sm:px-3 sm:py-2">Reuse</th>
             </tr>
           </thead>
           <tbody>
@@ -1322,11 +1322,11 @@ function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowR
                         : 'text-slate-300'
                     } ${landedRowKey === key ? 'row-land' : ''}`}
                   >
-                    <td className="p-3 align-top text-left font-medium whitespace-nowrap">{resin}</td>
-                    <td className="p-3 align-top text-left whitespace-normal break-words">{contamination}</td>
-                    <td className="p-3 align-top text-left whitespace-normal break-words">{rule.action}</td>
-                    <td className="p-3 align-top text-left whitespace-normal break-words">{rule.route}</td>
-                    <td className="p-3 align-top text-left whitespace-normal break-words">{rule.reuse}</td>
+                    <td className="p-3 sm:px-3 sm:py-2 align-top text-left font-medium whitespace-nowrap">{resin}</td>
+                    <td className="p-3 sm:px-3 sm:py-2 align-top text-left whitespace-normal break-words">{contamination}</td>
+                    <td className="p-3 sm:px-3 sm:py-2 align-top text-left whitespace-normal break-words">{rule.action}</td>
+                    <td className="p-3 sm:px-3 sm:py-2 align-top text-left whitespace-normal break-words">{rule.route}</td>
+                    <td className="p-3 sm:px-3 sm:py-2 align-top text-left whitespace-normal break-words">{rule.reuse}</td>
                   </tr>
                 );
               })
