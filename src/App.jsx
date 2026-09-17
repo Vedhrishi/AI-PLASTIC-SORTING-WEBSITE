@@ -532,8 +532,8 @@ export default function App() {
         </button>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 grid grid-cols-1 xl:grid-cols-[640px_1fr] gap-6">
-        <section className="space-y-4 min-w-0">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-4 sm:py-6 grid grid-cols-1 xl:grid-cols-[640px_1fr] xl:grid-rows-[minmax(0,1fr)] gap-6 xl:h-[calc(100vh-81px)] xl:overflow-hidden">
+        <section className="space-y-3 min-w-0 xl:min-h-0 xl:overflow-hidden">
           <VideoHud
             containerRef={containerRef}
             videoRef={videoRef}
@@ -566,7 +566,7 @@ export default function App() {
           />
         </section>
 
-        <section className="space-y-6 min-w-0">
+        <section className="space-y-4 min-w-0 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:pr-1">
           <div className="bg-slate-950 p-6 rounded-xl flex flex-col gap-6 w-full max-w-3xl mx-auto">
             <AnimatePresence mode="wait">
               {status === 'veto' ? (
@@ -590,16 +590,24 @@ export default function App() {
                 <EmptyPanel key="empty" status={status} />
               )}
             </AnimatePresence>
-
-            <DisposalRuleTable
-              activeResin={result?.resin.label}
-              activeContamination={result ? manualContamination : undefined}
-              onSelectRow={setDrawerRule}
-              rowRefs={rowRefs}
-              landedRowKey={landedRowKey}
-              tableScrollRef={tableScrollRef}
-            />
           </div>
+
+          <details className="group rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] w-full max-w-3xl mx-auto print:hidden">
+            <summary className="flex items-center justify-between gap-2 cursor-pointer select-none px-6 py-4 list-none [&::-webkit-details-marker]:hidden">
+              <span className="text-sm font-semibold text-gray-300">View Full Disposal Matrix</span>
+              <ChevronDown size={16} className="text-gray-500 transition-transform duration-200 group-open:rotate-180" />
+            </summary>
+            <div className="px-6 pb-6">
+              <DisposalRuleTable
+                activeResin={result?.resin.label}
+                activeContamination={result ? manualContamination : undefined}
+                onSelectRow={setDrawerRule}
+                rowRefs={rowRefs}
+                landedRowKey={landedRowKey}
+                tableScrollRef={tableScrollRef}
+              />
+            </div>
+          </details>
         </section>
       </main>
 
@@ -856,60 +864,64 @@ function describeDevice(device, index) {
 
 function SourceControls({ sourceMode, onFiles, onPreset, onReturnToCamera, videoDevices, selectedDeviceId, onSwitchCamera }) {
   return (
-    <div className="rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-4 space-y-3">
-      <div className="flex items-center justify-between">
+    <details className="group rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)]">
+      <summary className="flex items-center justify-between gap-2 cursor-pointer select-none px-4 py-3 list-none [&::-webkit-details-marker]:hidden">
         <span className="text-xs uppercase tracking-wide text-gray-500 flex items-center gap-1.5">
-          <Video size={13} /> Input source
+          <Video size={13} /> Input source &amp; demo presets
         </span>
+        <ChevronDown size={14} className="text-gray-500 transition-transform duration-200 group-open:rotate-180" />
+      </summary>
+
+      <div className="px-4 pb-4 space-y-3">
         {sourceMode !== 'camera' && (
           <button
             onClick={onReturnToCamera}
-            className="text-xs text-cyan-300 hover:text-cyan-200 border border-cyan-500/30 rounded-full px-3 py-1 transition-all duration-150 hover:scale-[1.02] active:scale-[0.98]"
+            className="w-full text-xs text-cyan-300 hover:text-cyan-200 border border-cyan-500/30 rounded-full px-3 py-1.5 transition-all duration-150 hover:scale-[1.01] active:scale-[0.98]"
           >
             Return to live camera
           </button>
         )}
-      </div>
 
-      {sourceMode === 'camera' && videoDevices.length > 1 && (
-        <div className="relative">
-          <select
-            value={selectedDeviceId ?? ''}
-            onChange={(e) => onSwitchCamera(e.target.value)}
-            className="w-full appearance-none text-xs text-gray-300 bg-slate-800/60 border border-slate-700/50 hover:border-cyan-500/40 rounded-xl pl-3 pr-8 py-2.5 cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
-          >
-            {videoDevices.map((device, i) => (
-              <option key={device.deviceId} value={device.deviceId}>
-                {describeDevice(device, i)}
-              </option>
-            ))}
-          </select>
-          <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-gray-500" />
-        </div>
-      )}
-
-      <label className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 border border-dashed border-slate-700/60 hover:border-cyan-500/50 rounded-xl px-3 py-2.5 cursor-pointer transition-all duration-150 hover:scale-[1.01] active:scale-[0.99]">
-        <Upload size={14} />
-        Inspect an image — click or drag &amp; drop onto the viewport
-        <input type="file" accept="image/*" className="hidden" onChange={(e) => onFiles(e.target.files)} />
-      </label>
-
-      <div>
-        <span className="text-xs uppercase tracking-wide text-gray-500">Quick-demo presets</span>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2">
-          {DEMO_PRESETS.map((preset) => (
-            <button
-              key={preset.key}
-              onClick={() => onPreset(preset)}
-              className="text-xs text-left rounded-xl border border-slate-700/50 hover:border-emerald-500/50 hover:bg-slate-800/60 hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 px-3 py-2.5 text-gray-300"
+        {sourceMode === 'camera' && videoDevices.length > 1 && (
+          <div className="relative">
+            <select
+              value={selectedDeviceId ?? ''}
+              onChange={(e) => onSwitchCamera(e.target.value)}
+              className="w-full appearance-none text-xs text-gray-300 bg-slate-800/60 border border-slate-700/50 hover:border-cyan-500/40 rounded-xl pl-3 pr-8 py-2.5 cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
             >
-              <div className="font-medium text-gray-200">{preset.label}</div>
-              <div className="text-gray-500 mt-0.5">{preset.resin} · {preset.contamination}</div>
-            </button>
-          ))}
+              {videoDevices.map((device, i) => (
+                <option key={device.deviceId} value={device.deviceId}>
+                  {describeDevice(device, i)}
+                </option>
+              ))}
+            </select>
+            <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-gray-500" />
+          </div>
+        )}
+
+        <label className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 border border-dashed border-slate-700/60 hover:border-cyan-500/50 rounded-xl px-3 py-2.5 cursor-pointer transition-all duration-150 hover:scale-[1.01] active:scale-[0.99]">
+          <Upload size={14} />
+          Inspect an image — click or drag &amp; drop onto the viewport
+          <input type="file" accept="image/*" className="hidden" onChange={(e) => onFiles(e.target.files)} />
+        </label>
+
+        <div>
+          <span className="text-xs uppercase tracking-wide text-gray-500">Quick-demo presets</span>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2">
+            {DEMO_PRESETS.map((preset) => (
+              <button
+                key={preset.key}
+                onClick={() => onPreset(preset)}
+                className="text-xs text-left rounded-xl border border-slate-700/50 hover:border-emerald-500/50 hover:bg-slate-800/60 hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 px-3 py-2.5 text-gray-300"
+              >
+                <div className="font-medium text-gray-200">{preset.label}</div>
+                <div className="text-gray-500 mt-0.5">{preset.resin} · {preset.contamination}</div>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
-    </div>
+    </details>
   );
 }
 
@@ -1274,17 +1286,16 @@ function FactChip({ label, value }) {
 
 function RuleRow({ label, value }) {
   return (
-    <div>
-      <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
-      <div className="text-sm text-gray-200">{value}</div>
+    <div className="rounded-xl bg-slate-800/40 border border-slate-700/40 px-4 py-3">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{label}</div>
+      <div className="text-base text-gray-100 mt-1 leading-snug">{value}</div>
     </div>
   );
 }
 
 function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowRefs, landedRowKey, tableScrollRef }) {
   return (
-    <div className="rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-6 print:break-inside-avoid">
-      <h3 className="text-sm font-semibold mb-3 text-gray-300">Stage 3 disposal rules</h3>
+    <div className="print:break-inside-avoid">
       <div ref={tableScrollRef} className="max-h-80 overflow-y-auto overflow-x-auto rounded-lg">
         <table className="w-full text-sm border-collapse">
           <colgroup>
