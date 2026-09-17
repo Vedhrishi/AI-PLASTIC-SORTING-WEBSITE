@@ -532,8 +532,13 @@ export default function App() {
         </button>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-4 sm:py-6 grid grid-cols-1 xl:grid-cols-[640px_1fr] xl:grid-rows-[minmax(0,1fr)] gap-6 xl:h-[calc(100vh-81px)] xl:overflow-hidden">
-        <section className="space-y-3 min-w-0 xl:min-h-0 xl:overflow-hidden">
+      <main className="w-full max-w-[98vw] mx-auto px-4 py-4 sm:py-6 grid grid-cols-1 lg:grid-cols-[45%_55%] xl:grid-cols-[40%_60%] lg:grid-rows-[minmax(0,1fr)] gap-6 lg:h-[calc(100vh-81px)] lg:overflow-hidden">
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="space-y-3 min-w-0 lg:min-h-0 lg:overflow-hidden"
+        >
           <VideoHud
             containerRef={containerRef}
             videoRef={videoRef}
@@ -564,10 +569,15 @@ export default function App() {
             selectedDeviceId={selectedDeviceId}
             onSwitchCamera={switchCamera}
           />
-        </section>
+        </motion.section>
 
-        <section className="space-y-4 min-w-0 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:pr-1">
-          <div className="bg-slate-950 p-6 rounded-xl flex flex-col gap-6 w-full max-w-3xl mx-auto">
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.1 }}
+          className="space-y-4 min-w-0 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-1"
+        >
+          <div className="bg-slate-950 p-6 rounded-xl flex flex-col gap-6 w-full">
             <AnimatePresence mode="wait">
               {status === 'veto' ? (
                 <VetoAlert key="veto" onScanAgain={sourceMode === 'camera' ? scanAgain : undefined} />
@@ -592,23 +602,15 @@ export default function App() {
             </AnimatePresence>
           </div>
 
-          <details className="group rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] w-full max-w-3xl mx-auto print:hidden">
-            <summary className="flex items-center justify-between gap-2 cursor-pointer select-none px-6 py-4 list-none [&::-webkit-details-marker]:hidden">
-              <span className="text-sm font-semibold text-gray-300">View Full Disposal Matrix</span>
-              <ChevronDown size={16} className="text-gray-500 transition-transform duration-200 group-open:rotate-180" />
-            </summary>
-            <div className="px-6 pb-6">
-              <DisposalRuleTable
-                activeResin={result?.resin.label}
-                activeContamination={result ? manualContamination : undefined}
-                onSelectRow={setDrawerRule}
-                rowRefs={rowRefs}
-                landedRowKey={landedRowKey}
-                tableScrollRef={tableScrollRef}
-              />
-            </div>
-          </details>
-        </section>
+          <DisposalMatrixAccordion
+            activeResin={result?.resin.label}
+            activeContamination={result ? manualContamination : undefined}
+            onSelectRow={setDrawerRule}
+            rowRefs={rowRefs}
+            landedRowKey={landedRowKey}
+            tableScrollRef={tableScrollRef}
+          />
+        </motion.section>
       </main>
 
       {/* Hidden, fixed-width (800px), plain-inline-style receipt template —
@@ -721,8 +723,7 @@ function VideoHud({
   return (
     <div
       ref={containerRef}
-      className={`relative rounded-2xl overflow-hidden border border-slate-700/50 bg-black shadow-2xl ${isDragActive ? 'dropzone-active' : ''}`}
-      style={{ width: VIDEO_WIDTH, maxWidth: '100%', aspectRatio: `${VIDEO_WIDTH}/${VIDEO_HEIGHT}` }}
+      className={`relative rounded-2xl overflow-hidden border border-slate-700/50 bg-black shadow-2xl aspect-video w-full ${isDragActive ? 'dropzone-active' : ''}`}
       onDragOver={(e) => {
         e.preventDefault();
         onDragActive(true);
@@ -1296,8 +1297,8 @@ function RuleRow({ label, value }) {
 function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowRefs, landedRowKey, tableScrollRef }) {
   return (
     <div className="print:break-inside-avoid">
-      <div ref={tableScrollRef} className="max-h-80 overflow-y-auto overflow-x-auto rounded-lg">
-        <table className="w-full text-sm border-collapse">
+      <div ref={tableScrollRef} className="rounded-lg">
+        <table className="w-full table-fixed text-sm border-collapse">
           <colgroup>
             <col className="w-[9%]" />
             <col className="w-[16%]" />
@@ -1305,7 +1306,7 @@ function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowR
             <col className="w-[27%]" />
             <col className="w-[26%]" />
           </colgroup>
-          <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-sm">
+          <thead className="bg-slate-900/95 backdrop-blur-sm">
             <tr className="text-left text-slate-500">
               <th className="p-3 sm:px-3 sm:py-2 whitespace-nowrap">Resin</th>
               <th className="p-3 sm:px-3 sm:py-2 whitespace-nowrap">Contamination</th>
@@ -1333,7 +1334,7 @@ function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowR
                         : 'text-slate-300'
                     } ${landedRowKey === key ? 'row-land' : ''}`}
                   >
-                    <td className="p-3 sm:px-3 sm:py-2 align-top text-left font-medium whitespace-nowrap">{resin}</td>
+                    <td className="p-3 sm:px-3 sm:py-2 align-top text-left font-medium whitespace-normal break-words">{resin}</td>
                     <td className="p-3 sm:px-3 sm:py-2 align-top text-left whitespace-normal break-words">{contamination}</td>
                     <td className="p-3 sm:px-3 sm:py-2 align-top text-left whitespace-normal break-words">{rule.action}</td>
                     <td className="p-3 sm:px-3 sm:py-2 align-top text-left whitespace-normal break-words">{rule.route}</td>
@@ -1345,6 +1346,43 @@ function DisposalRuleTable({ activeResin, activeContamination, onSelectRow, rowR
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function DisposalMatrixAccordion({ activeResin, activeContamination, onSelectRow, rowRefs, landedRowKey, tableScrollRef }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div className="rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)] w-full print:hidden">
+      <button
+        type="button"
+        onClick={() => setIsOpen((open) => !open)}
+        aria-expanded={isOpen}
+        className="w-full flex items-center justify-between gap-2 px-6 py-4 text-left"
+      >
+        <span className="text-sm font-semibold text-gray-300">View Full Disposal Matrix</span>
+        <motion.span animate={{ rotate: isOpen ? 180 : 0 }} transition={{ duration: 0.2 }}>
+          <ChevronDown size={16} className="text-gray-500" />
+        </motion.span>
+      </button>
+      <motion.div
+        initial={false}
+        animate={{ height: isOpen ? 'auto' : 0 }}
+        transition={{ duration: 0.35, ease: 'easeInOut' }}
+        style={{ overflow: 'hidden' }}
+      >
+        <div className="px-6 pb-6">
+          <DisposalRuleTable
+            activeResin={activeResin}
+            activeContamination={activeContamination}
+            onSelectRow={onSelectRow}
+            rowRefs={rowRefs}
+            landedRowKey={landedRowKey}
+            tableScrollRef={tableScrollRef}
+          />
+        </div>
+      </motion.div>
     </div>
   );
 }
