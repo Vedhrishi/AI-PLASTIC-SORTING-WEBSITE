@@ -64,7 +64,7 @@ npm run audit:ci   # npm audit, fails on high/critical
   disposal matrix, loaders and worker clients, error messages, security headers.
 - **Golden model tests**: run the shipped `.onnx` files with onnxruntime-node and compare against recorded reference outputs and
   SHA-256 checksums. After intentionally replacing a model, run `npm run models:manifest` and update the reference values.
-- **E2E** (`npm run test:e2e`, 47 checks): happy path, camera denied / missing / unsupported, model download failure and retry,
+- **E2E** (`npm run test:e2e`, 48 checks): happy path, camera denied / missing / unsupported, model download failure and retry,
   offline and recovery, WebGL unavailable, unsupported browser, mobile viewport, 25-scan leak check, 4x CPU throttle, receipt
   export, enforced CSP, and a check that no request leaves the origin.
 - `npm run test:eval` scores your own photos placed in `test-images/` (see that folder's README).
