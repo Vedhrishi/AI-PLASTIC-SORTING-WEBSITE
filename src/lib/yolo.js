@@ -1,4 +1,4 @@
-import { ort } from './onnxSetup';
+import { Tensor } from './tensor';
 import { nms } from './geometry';
 
 export const YOLO_INPUT_SIZE = 640;
@@ -39,7 +39,7 @@ export function canvasToCHWTensor(canvas) {
     float32[size * 2 + i] = b; // B plane
   }
 
-  return new ort.Tensor('float32', float32, [1, 3, canvas.height, canvas.width]);
+  return new Tensor('float32', float32, [1, 3, canvas.height, canvas.width]);
 }
 
 // Decodes a YOLOv8-style single-class detection head with output shape
@@ -107,9 +107,19 @@ export function decodeYoloOutput(outputTensor, srcW, srcH, letterboxInfo, opts =
 export async function detectPlastic(session, videoEl, srcW, srcH, opts) {
   const { canvas: lbCanvas, scale, offsetX, offsetY } = letterbox(videoEl, srcW, srcH);
   const inputTensor = canvasToCHWTensor(lbCanvas);
+  // The pixels now live in the tensor; drop the 640x640 backing store right
+  // away instead of waiting for GC (matters on memory-tight mobile browsers).
+  lbCanvas.width = 0;
+  lbCanvas.height = 0;
+
   const inputName = session.inputNames[0];
   const outputName = session.outputNames[0];
-  const results = await session.run({ [inputName]: inputTensor });
-  const output = results[outputName];
-  return decodeYoloOutput(output, srcW, srcH, { scale, offsetX, offsetY }, opts);
+  let results;
+  try {
+    results = await session.run({ [inputName]: inputTensor });
+    return decodeYoloOutput(results[outputName], srcW, srcH, { scale, offsetX, offsetY }, opts);
+  } finally {
+    inputTensor.dispose?.();
+    if (results) for (const tensor of Object.values(results)) tensor.dispose?.();
+  }
 }

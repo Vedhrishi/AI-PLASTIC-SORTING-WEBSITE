@@ -1,13 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import * as cocoSsd from '@tensorflow-models/coco-ssd';
-import * as tf from '@tensorflow/tfjs';
 import { AnimatePresence, motion } from 'framer-motion';
-// html2canvas-pro, not html2canvas: Tailwind v4's default palette emits
-// oklch()/oklab() colors, which stock html2canvas (last released for the
-// pre-CSS-Color-4 web) cannot parse — every capture throws
-// "unsupported color function". This fork is API-compatible and adds that
-// support, which is the actual fix rather than a workaround.
-import html2canvas from 'html2canvas-pro';
 import {
   Camera,
   AlertTriangle,
@@ -26,11 +18,12 @@ import {
   ChevronDown,
 } from 'lucide-react';
 
-import { loadSession } from './lib/onnxSetup';
+import { loadAllModels } from './lib/models';
+import { detectSupport, describeCameraError, describeModelError } from './lib/env';
 import { detectPlastic } from './lib/yolo';
 import { classifyResin, cropAndResize } from './lib/classify';
 import { overlapFraction, computeCoverProjection, projectBox } from './lib/geometry';
-import { DISPOSAL_RULES, getDisposalRule } from './data/disposalRules';
+import { DISPOSAL_RULES, RESIN_ORDER, CONTAMINATION_ORDER, getDisposalRule } from './data/disposalRules';
 import { RESIN_INFO } from './data/resinInfo';
 import * as audio from './lib/audioManager';
 
@@ -46,8 +39,8 @@ const CONFIDENCE_THRESHOLD = 0.8;
 const YOLO_CONFIDENCE_THRESHOLD = 0.25;
 const YOLO_NMS_IOU_THRESHOLD = 0.45;
 
-const RESIN_ORDER = ['PET', 'HDPE', 'PP', 'PS'];
-const CONTAMINATION_ORDER = ['Clean/Light Soiling', 'Moderate Contamination', 'Heavy Contamination'];
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
 
 const DEMO_PRESETS = [
   { key: 'pet-clean', label: 'Clean PET Bottle', resin: 'PET', code: 1, resinConf: 0.974, contamination: 'Clean/Light Soiling', contamConf: 0.951 },
@@ -84,7 +77,7 @@ function deriveAppState(status) {
   return 'results';
 }
 
-export default function App() {
+function Dashboard() {
   const videoRef = useRef(null);
   const overlayRef = useRef(null);
   const frozenCanvasRef = useRef(null);
@@ -95,15 +88,23 @@ export default function App() {
   const rowRefs = useRef({});
   const tableScrollRef = useRef(null);
 
-  const [loadState, setLoadState] = useState('loading'); // loading | ready | error
-  const [loadError, setLoadError] = useState(null);
+  const cameraTokenRef = useRef(0);
+
+  // Models and camera load independently: a camera problem must never block
+  // uploads/presets, and a model problem must never hide the camera message.
+  const [loadState, setLoadState] = useState('loading'); // models: loading | ready | error
+  const [loadIssue, setLoadIssue] = useState(null);
+  const [modelProgress, setModelProgress] = useState(0);
+  const [initAttempt, setInitAttempt] = useState(0);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraIssue, setCameraIssue] = useState(null);
   const [status, setStatus] = useState('idle'); // idle | analyzing | veto | result | no-item | classifier-error
   const [result, setResult] = useState(null);
   const [drawerRule, setDrawerRule] = useState(null);
   const [muted, setMuted] = useState(false);
   const [sourceMode, setSourceMode] = useState('camera'); // camera | upload | preset
   const [isDragActive, setIsDragActive] = useState(false);
-  const [diagnostics, setDiagnostics] = useState({ latencyMs: 0, engine: 'ONNX Runtime Web · WebGL (GPU) → WASM' });
+  const [diagnostics, setDiagnostics] = useState({ latencyMs: 0, engine: 'loading…' });
   const [landedRowKey, setLandedRowKey] = useState(null);
   const [classifierErrorMessage, setClassifierErrorMessage] = useState(null);
   // Contamination is now a manual, user-controlled call — not a model
@@ -129,6 +130,7 @@ export default function App() {
   // permission has been granted at least once, so we always re-enumerate
   // right after a successful getUserMedia call.
   const startCamera = useCallback(async (deviceId) => {
+    const token = ++cameraTokenRef.current;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -141,10 +143,23 @@ export default function App() {
       audio: false,
     });
 
+    // A newer startCamera() call (StrictMode remount, device switch, retry)
+    // superseded this one while the permission prompt was open: release this
+    // stream instead of leaking an orphaned, still-lit camera.
+    if (token !== cameraTokenRef.current) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+
     streamRef.current = stream;
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
-      await videoRef.current.play();
+      try {
+        await videoRef.current.play();
+      } catch (err) {
+        if (err?.name === 'AbortError' && token !== cameraTokenRef.current) return;
+        throw err;
+      }
     }
 
     try {
@@ -158,74 +173,75 @@ export default function App() {
     }
   }, []);
 
-  const switchCamera = useCallback(
-    async (deviceId) => {
+  // Starts the camera and turns any failure into a specific, actionable
+  // message instead of a raw browser error string.
+  const startCameraSafe = useCallback(
+    async (deviceId = undefined) => {
       try {
         await startCamera(deviceId);
+        setCameraIssue(null);
+        setCameraReady(true);
       } catch (err) {
-        console.error('Failed to switch camera', err);
+        console.warn('Camera unavailable', err);
+        setCameraReady(false);
+        setCameraIssue(describeCameraError(err));
       }
     },
     [startCamera]
   );
 
-  // ---- load webcam + models in parallel (camera issues shouldn't block model loading) ----
+  const switchCamera = useCallback((deviceId) => startCameraSafe(deviceId), [startCameraSafe]);
+
+  useEffect(() => {
+    startCameraSafe();
+    return () => {
+      cameraTokenRef.current += 1;
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+    };
+  }, [startCameraSafe]);
+
   useEffect(() => {
     let cancelled = false;
+    setLoadState('loading');
+    setLoadIssue(null);
+    setModelProgress(0);
 
-    async function initModels() {
-      try {
-        await tf.setBackend('webgl');
-      } catch (err) {
-        console.warn('tfjs WebGL backend unavailable, falling back to default backend', err);
-      }
-      await tf.ready();
-
-      const [personModel, plasticSession, resinSession] = await Promise.all([
-        cocoSsd.load({ base: 'lite_mobilenet_v2' }),
-        // YOLO is the heavy compute stage (640x640 input) — worth the GPU.
-        loadSession('/models/best.onnx'),
-        // ResNet18 classifier is small/fast on WASM alone; pinning it to
-        // WASM avoids WebGL op-coverage/precision edge cases silently
-        // corrupting classification output on some mobile GPUs.
-        // Stage 4 (contamination-resnet18.onnx) is no longer loaded at all —
-        // contamination is now a manual user selection (see
-        // manualContamination state), not a model inference, so this heavy
-        // model download/init is dropped entirely for faster load and less
-        // memory/compute pressure on mobile.
-        loadSession('/models/resin-resnet18.onnx', { executionProviders: ['wasm'] }),
-      ]);
-      if (cancelled) return;
-      modelsRef.current = { personModel, plasticSession, resinSession };
-    }
-
-    async function init() {
-      try {
-        await Promise.all([startCamera(), initModels()]);
+    loadAllModels({ onProgress: (fraction) => !cancelled && setModelProgress(fraction) })
+      .then((models) => {
         if (cancelled) return;
+        modelsRef.current = models;
+        setDiagnostics((d) => ({ ...d, engine: models.engine }));
         setLoadState('ready');
-      } catch (err) {
-        console.error(err);
-        if (!cancelled) {
-          setLoadError(err.message || String(err));
-          setLoadState('error');
-        }
-      }
-    }
-
-    init();
+      })
+      .catch((err) => {
+        console.error('Model load failed', err);
+        if (cancelled) return;
+        setLoadIssue(describeModelError(err));
+        setLoadState('error');
+      });
 
     return () => {
       cancelled = true;
-      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
     };
-  }, [startCamera]);
+  }, [initAttempt]);
+
+  const retryModels = useCallback(() => setInitAttempt((n) => n + 1), []);
+
+  // Coming back online after a failed download retries automatically.
+  useEffect(() => {
+    if (loadState !== 'error') return undefined;
+    window.addEventListener('online', retryModels);
+    return () => window.removeEventListener('online', retryModels);
+  }, [loadState, retryModels]);
 
   // Draws detection boxes onto the overlay canvas, scaled from the
   // VIDEO_WIDTH x VIDEO_HEIGHT canonical frame (every captured/uploaded
   // source is normalized to this box via coverFitCanvas before detection
   // ever runs) into the container's live on-screen size.
-  const drawOverlay = useCallback((plasticBox, personBoxes, vetoed, extraLabel) => {
+  const drawOverlay = useCallback((plasticBox, personBoxes, vetoed, extraLabel = undefined) => {
     const canvas = overlayRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
@@ -303,6 +319,12 @@ export default function App() {
   const analyzeSnapshot = useCallback(
     async (canvas) => {
       if (isProcessingRef.current) return;
+      if (!modelsRef.current) {
+        setResult(null);
+        setClassifierErrorMessage('The recognition models are not loaded yet — wait for loading to finish, then try again.');
+        setStatus('classifier-error');
+        return;
+      }
       isProcessingRef.current = true;
 
       const { personModel, plasticSession, resinSession } = modelsRef.current;
@@ -364,6 +386,8 @@ export default function App() {
         let resin;
         try {
           resin = await classifyResin(resinSession, cropped);
+          cropped.width = 0;
+          cropped.height = 0;
         } catch (err) {
           const message = err?.message ?? String(err);
           console.error(`[analyzeSnapshot] Stage 3 failed: ${message}`, err);
@@ -445,12 +469,37 @@ export default function App() {
     }
   }, [status, result, manualContamination]);
 
+  // Shows an upload problem in the results panel instead of failing silently.
+  const rejectUpload = useCallback((message) => {
+    setSourceMode('upload');
+    setResult(null);
+    setClassifierErrorMessage(message);
+    setStatus('classifier-error');
+  }, []);
+
   const handleFiles = useCallback(
     (files) => {
       const file = files?.[0];
-      if (!file || !file.type.startsWith('image/')) return;
+      if (!file) return;
+      if (!modelsRef.current) {
+        rejectUpload('The recognition models are still loading — try again in a moment.');
+        return;
+      }
+      if (!file.type.startsWith('image/')) {
+        rejectUpload('That file is not an image. Choose a JPG, PNG or WebP photo.');
+        return;
+      }
+      if (file.size > MAX_UPLOAD_BYTES) {
+        rejectUpload('That image is larger than 25 MB. Choose a smaller photo.');
+        return;
+      }
+
+      // The file is read and analysed entirely in this tab; it is never sent
+      // anywhere. The object URL is released as soon as the bitmap is decoded.
+      const url = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => {
+        URL.revokeObjectURL(url);
         setSourceMode('upload');
         const frame = coverFitCanvas(img, VIDEO_WIDTH, VIDEO_HEIGHT);
         const frozen = frozenCanvasRef.current;
@@ -461,9 +510,13 @@ export default function App() {
         }
         analyzeSnapshot(frame);
       };
-      img.src = URL.createObjectURL(file);
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        rejectUpload('That file could not be read as an image. It may be corrupted or in an unsupported format.');
+      };
+      img.src = url;
     },
-    [analyzeSnapshot]
+    [analyzeSnapshot, rejectUpload]
   );
 
   const applyPreset = useCallback((preset) => {
@@ -545,7 +598,12 @@ export default function App() {
             overlayRef={overlayRef}
             frozenCanvasRef={frozenCanvasRef}
             loadState={loadState}
-            loadError={loadError}
+            loadIssue={loadIssue}
+            modelProgress={modelProgress}
+            cameraReady={cameraReady}
+            cameraIssue={cameraIssue}
+            onRetryModels={retryModels}
+            onRetryCamera={() => startCameraSafe(selectedDeviceId ?? undefined)}
             status={status}
             appState={appState}
             sourceMode={sourceMode}
@@ -556,7 +614,7 @@ export default function App() {
             onScanAgain={sourceMode === 'camera' ? scanAgain : undefined}
           />
 
-          <StatusBadge status={status} sourceMode={sourceMode} />
+          <StatusBadge status={status} sourceMode={sourceMode} cameraIssue={cameraIssue} />
 
           <DiagnosticsBar diagnostics={diagnostics} />
 
@@ -568,6 +626,7 @@ export default function App() {
             videoDevices={videoDevices}
             selectedDeviceId={selectedDeviceId}
             onSwitchCamera={switchCamera}
+            modelsReady={loadState === 'ready'}
           />
         </motion.section>
 
@@ -705,7 +764,12 @@ function VideoHud({
   overlayRef,
   frozenCanvasRef,
   loadState,
-  loadError,
+  loadIssue,
+  modelProgress,
+  cameraReady,
+  cameraIssue,
+  onRetryModels,
+  onRetryCamera,
   status,
   appState,
   sourceMode,
@@ -717,7 +781,8 @@ function VideoHud({
 }) {
   const showLiveVideo = sourceMode === 'camera' && appState === 'live';
   const showFrozenFrame = sourceMode !== 'preset' && !showLiveVideo;
-  const showTakePhoto = sourceMode === 'camera' && appState === 'live' && loadState === 'ready';
+  const showTakePhoto = sourceMode === 'camera' && appState === 'live' && loadState === 'ready' && cameraReady;
+  const showCameraIssue = sourceMode === 'camera' && appState === 'live' && Boolean(cameraIssue) && loadState === 'ready';
   const showScanAgain = sourceMode === 'camera' && appState !== 'live' && onScanAgain;
 
   return (
@@ -782,20 +847,56 @@ function VideoHud({
         </div>
       )}
 
-      {loadState !== 'ready' && (
+      {loadState === 'loading' && (
         <div data-testid="loading-overlay" className="absolute inset-0 flex flex-col items-center justify-center gap-3 backdrop-blur-xl bg-slate-950/80 text-sm">
-          {loadState === 'loading' && (
-            <>
-              <Loader2 className="animate-spin text-emerald-400" size={28} />
-              <span>Loading camera &amp; models…</span>
-            </>
-          )}
-          {loadState === 'error' && (
-            <>
-              <AlertTriangle className="text-red-400" size={28} />
-              <span className="text-red-300 px-6 text-center">{loadError}</span>
-            </>
-          )}
+          <Loader2 className="animate-spin text-emerald-400" size={28} />
+          <span>Loading recognition models…{modelProgress > 0 ? ` ${Math.round(modelProgress * 100)}%` : ''}</span>
+        </div>
+      )}
+
+      {loadState === 'error' && loadIssue && (
+        <div
+          role="alert"
+          data-testid="model-error"
+          data-issue-kind={loadIssue.kind}
+          className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 backdrop-blur-xl bg-slate-950/90 px-6 text-center text-sm"
+        >
+          <AlertTriangle className="text-red-400" size={28} />
+          <span className="font-semibold text-red-300">{loadIssue.title}</span>
+          <span className="text-gray-300">{loadIssue.message}</span>
+          {loadIssue.hint && <span className="text-xs text-gray-500">{loadIssue.hint}</span>}
+          <button
+            type="button"
+            data-testid="retry-models"
+            onClick={onRetryModels}
+            className="mt-2 flex items-center gap-2 text-xs font-medium rounded-full border border-emerald-400/40 hover:bg-emerald-500/10 px-4 py-2 text-emerald-200"
+          >
+            <RotateCcw size={14} />
+            Retry
+          </button>
+        </div>
+      )}
+
+      {showCameraIssue && (
+        <div
+          role="status"
+          data-testid="camera-issue"
+          data-issue-kind={cameraIssue.kind}
+          className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-slate-950/90 px-6 text-center text-sm"
+        >
+          <Camera className="text-amber-300" size={28} />
+          <span className="font-semibold text-amber-200">{cameraIssue.title}</span>
+          <span className="text-gray-300">{cameraIssue.message}</span>
+          {cameraIssue.hint && <span className="text-xs text-gray-500">{cameraIssue.hint}</span>}
+          <button
+            type="button"
+            data-testid="retry-camera"
+            onClick={onRetryCamera}
+            className="mt-2 flex items-center gap-2 text-xs font-medium rounded-full border border-amber-400/40 hover:bg-amber-500/10 px-4 py-2 text-amber-100"
+          >
+            <RotateCcw size={14} />
+            Retry camera
+          </button>
         </div>
       )}
 
@@ -863,7 +964,7 @@ function describeDevice(device, index) {
   return label;
 }
 
-function SourceControls({ sourceMode, onFiles, onPreset, onReturnToCamera, videoDevices, selectedDeviceId, onSwitchCamera }) {
+function SourceControls({ sourceMode, onFiles, onPreset, onReturnToCamera, videoDevices, selectedDeviceId, onSwitchCamera, modelsReady }) {
   return (
     <details className="group rounded-2xl border border-white/10 backdrop-blur-2xl bg-slate-900/40 shadow-[0_8px_32px_rgba(0,0,0,0.4)]">
       <summary className="flex items-center justify-between gap-2 cursor-pointer select-none px-4 py-3 list-none [&::-webkit-details-marker]:hidden">
@@ -900,10 +1001,19 @@ function SourceControls({ sourceMode, onFiles, onPreset, onReturnToCamera, video
           </div>
         )}
 
-        <label className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 border border-dashed border-slate-700/60 hover:border-cyan-500/50 rounded-xl px-3 py-2.5 cursor-pointer transition-all duration-150 hover:scale-[1.01] active:scale-[0.99]">
+        <label className={`flex items-center gap-2 text-xs border border-dashed rounded-xl px-3 py-2.5 transition-all duration-150 ${modelsReady ? 'text-gray-400 hover:text-gray-200 border-slate-700/60 hover:border-cyan-500/50 cursor-pointer hover:scale-[1.01] active:scale-[0.99]' : 'text-gray-600 border-slate-800 cursor-not-allowed'}`}>
           <Upload size={14} />
-          Inspect an image — click or drag &amp; drop onto the viewport
-          <input type="file" accept="image/*" className="hidden" onChange={(e) => onFiles(e.target.files)} />
+          {modelsReady ? 'Inspect an image — click or drag & drop onto the viewport' : 'Image upload unlocks when the models finish loading'}
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            disabled={!modelsReady}
+            onChange={(e) => {
+              onFiles(e.target.files);
+              e.target.value = '';
+            }}
+          />
         </label>
 
         <div>
@@ -926,9 +1036,14 @@ function SourceControls({ sourceMode, onFiles, onPreset, onReturnToCamera, video
   );
 }
 
-function StatusBadge({ status, sourceMode }) {
+function StatusBadge({ status, sourceMode, cameraIssue }) {
+  const cameraDown = sourceMode === 'camera' && Boolean(cameraIssue);
   const config = {
-    idle: { text: 'Live — frame the item and tap Take Photo', color: 'bg-slate-800/80 text-slate-300 border-slate-700/50', icon: Camera },
+    idle: {
+      text: cameraDown ? 'Camera unavailable — upload an image or try a demo preset' : 'Live — frame the item and tap Take Photo',
+      color: 'bg-slate-800/80 text-slate-300 border-slate-700/50',
+      icon: Camera,
+    },
     analyzing: {
       text: sourceMode === 'preset' ? 'Simulating scan…' : 'Frame captured — analyzing resin & contamination…',
       color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
@@ -942,14 +1057,14 @@ function StatusBadge({ status, sourceMode }) {
     'no-item': { text: 'No plastic item detected', color: 'bg-slate-800/80 text-slate-300 border-slate-700/50', icon: Camera },
     result: { text: 'Item identified', color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30', icon: Recycle },
     'classifier-error': {
-      text: 'Classification failed — check console for details',
+      text: 'Scan failed — see the message in the results panel',
       color: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
       icon: AlertTriangle,
     },
   }[status] ?? { text: 'Idle', color: 'bg-slate-800/80 text-slate-300 border-slate-700/50', icon: Camera };
 
   const Icon = config.icon;
-  const showRadar = status === 'idle' || status === 'no-item';
+  const showRadar = (status === 'idle' && !cameraDown) || status === 'no-item';
 
   return (
     <div className="relative inline-flex items-center">
@@ -988,7 +1103,7 @@ function DiagnosticsBar({ diagnostics }) {
   );
 }
 
-function ConfidenceRing({ label, value, ringClass = 'text-emerald-400', testId, labelTestId }) {
+function ConfidenceRing({ label, value, ringClass = 'text-emerald-400', testId, labelTestId = undefined }) {
   const pct = Math.round(value * 100);
   const radius = 26;
   const circumference = 2 * Math.PI * radius;
@@ -1072,7 +1187,7 @@ function ContaminationSlider({ value, onChange }) {
 function EmptyPanel({ status }) {
   const text =
     status === 'analyzing'
-      ? 'Frame captured. Running the resin and contamination models once on this snapshot…'
+      ? 'Frame captured. Running the detection and resin models once on this snapshot…'
       : 'Frame a single plastic item in the viewfinder, away from hands, and tap Take Photo — or upload an image / try a demo preset — to get a resin ID, contamination level, and disposal recommendation.';
 
   return (
@@ -1135,9 +1250,9 @@ function ClassifierErrorAlert({ message, onScanAgain }) {
       <div className="flex items-start gap-3">
         <AlertTriangle className="text-amber-400 shrink-0 mt-0.5" size={22} />
         <div>
-          <h2 className="text-amber-300 font-semibold">Resin/contamination classifier failed</h2>
+          <h2 className="text-amber-300 font-semibold">This scan could not be completed</h2>
           <p className="text-sm text-amber-200/80 mt-1">
-            Stage 2 (plastic detection) succeeded, but Stage 3/4 inference on the captured photo threw an error.
+            Something went wrong while analysing the image. Nothing was uploaded — everything stays on your device.
           </p>
           {message && (
             <code className="block mt-2 text-xs text-amber-300/90 bg-amber-950/60 border border-amber-500/20 rounded-lg px-3 py-2 font-mono break-words">
@@ -1175,6 +1290,10 @@ function ResultCard({ result, rule, contaminationLabel, onContaminationChange, o
     if (!receiptElement) return;
     setExporting(true);
     try {
+      // html2canvas-pro, not html2canvas: Tailwind v4 emits oklch()/oklab()
+      // colors, which stock html2canvas cannot parse. Loaded on demand — it is
+      // only needed when the user exports a receipt.
+      const { default: html2canvas } = await import('html2canvas-pro');
       const canvas = await html2canvas(receiptElement, {
         scale: 2,
         backgroundColor: '#0f172a',
@@ -1451,4 +1570,31 @@ function DrawerField({ label, value }) {
       <div className="text-sm text-gray-200">{value}</div>
     </div>
   );
+}
+
+function UnsupportedBrowser({ problems }) {
+  return (
+    <div
+      role="alert"
+      data-testid="unsupported-browser"
+      className="min-h-screen flex items-center justify-center bg-[#05060a] text-gray-100 p-6"
+    >
+      <div className="max-w-md text-center space-y-3">
+        <AlertTriangle className="mx-auto text-amber-400" size={32} />
+        <h1 className="text-xl font-semibold">This browser cannot run Plastic Decoder</h1>
+        <ul className="text-sm text-gray-400 space-y-1">
+          {problems.map((problem) => (
+            <li key={problem}>{problem}</li>
+          ))}
+        </ul>
+        <p className="text-sm text-gray-500">Please open this page in a current version of Chrome, Edge, Firefox or Safari.</p>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const support = detectSupport();
+  if (!support.ok) return <UnsupportedBrowser problems={support.problems} />;
+  return <Dashboard />;
 }
