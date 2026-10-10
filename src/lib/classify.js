@@ -1,4 +1,4 @@
-import { ort } from './onnxSetup';
+import { Tensor } from './tensor';
 
 export const CLASSIFIER_INPUT_SIZE = 224;
 
@@ -70,10 +70,10 @@ export function canvasToNormalizedTensor(canvas) {
     );
   }
 
-  return new ort.Tensor('float32', tensorData, [1, 3, height, width]);
+  return new Tensor('float32', tensorData, [1, 3, height, width]);
 }
 
-function softmaxArgmax(data) {
+export function softmaxArgmax(data) {
   const max = Math.max(...data);
   const exps = Array.from(data, (v) => Math.exp(v - max));
   const sum = exps.reduce((a, b) => a + b, 0);
@@ -104,17 +104,21 @@ function logInferenceFailure(label, err, session, tensor) {
 
 export async function classifyResin(session, croppedCanvas) {
   let tensor;
+  let results;
   try {
     tensor = canvasToNormalizedTensor(croppedCanvas);
     const inputName = session.inputNames[0];
     const outputName = session.outputNames[0];
-    const results = await session.run({ [inputName]: tensor });
+    results = await session.run({ [inputName]: tensor });
     const { index, confidence } = softmaxArgmax(results[outputName].data);
     const resin = RESIN_CODES[index] ?? { code: null, label: 'Unknown' };
     return { ...resin, confidence };
   } catch (err) {
     logInferenceFailure('classifyResin', err, session, tensor);
     throw err;
+  } finally {
+    tensor?.dispose?.();
+    if (results) for (const out of Object.values(results)) out.dispose?.();
   }
 }
 

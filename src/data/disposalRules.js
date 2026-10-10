@@ -3,6 +3,9 @@
 // { action, route, reuse }. Resin keys use the app's canonical labels
 // (HDPE, matching classify.js's RESIN_CODES output) rather than the ISO
 // "PE-HD" designation from the source dataset.
+export const RESIN_ORDER = ['PET', 'HDPE', 'PP', 'PS'];
+export const CONTAMINATION_ORDER = ['Clean/Light Soiling', 'Moderate Contamination', 'Heavy Contamination'];
+
 export const DISPOSAL_RULES = {
   PET: {
     'Clean/Light Soiling': {

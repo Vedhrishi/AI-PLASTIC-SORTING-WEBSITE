@@ -4,7 +4,7 @@ let muted = false;
 
 function getCtx() {
   if (!ctx) {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const AudioCtx = window.AudioContext || /** @type {any} */ (window).webkitAudioContext;
     ctx = new AudioCtx();
   }
   if (ctx.state === 'suspended') ctx.resume();

@@ -4,10 +4,18 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>plastic-decoder-project</title>
+    <meta name="description" content="Plastic Decoder identifies plastic resin types (PET, HDPE, PP, PS) from a photo and gives Indian PWM disposal guidance. Everything runs in your browser; images never leave your device." />
+    <meta name="theme-color" content="#05060a" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Plastic Decoder — in-browser plastic resin identifier</title>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      <p style="font-family: system-ui, sans-serif; color: #e5e7eb; background: #05060a; padding: 24px;">
+        Plastic Decoder needs JavaScript to run its in-browser recognition models. Please enable JavaScript and reload.
+      </p>
+    </noscript>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
