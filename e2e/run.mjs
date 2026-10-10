@@ -148,6 +148,9 @@ async function scenarioHappyPath(browser) {
   const name = 'happy path (fake camera, production build + headers)';
   const { context, page, consoleErrors, consoleWarnings } = await newPage(browser);
   await context.grantPermissions(['camera'], { origin: URL_BASE });
+  /** @type {{ method: string, url: string, body: string | null }[]} */
+  const requests = [];
+  context.on('request', (req) => requests.push({ method: req.method(), url: req.url(), body: req.postData() }));
   const response = await page.goto(URL_BASE, { waitUntil: 'load' });
 
   const headers = response.headers();
@@ -181,6 +184,13 @@ async function scenarioHappyPath(browser) {
   const [download] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.getByText('Export audit receipt').click()]);
   await download.saveAs(join(outDir, 'receipt.png'));
   record(name, 'receipt export downloads a PNG', /^Scan-Receipt-\d+\.png$/.test(download.suggestedFilename()), download.suggestedFilename());
+
+  // Privacy: frames are analysed locally. Every request the app made while
+  // loading, scanning (camera + upload) and exporting was a body-less GET to
+  // its own origin (or an in-memory blob:/data: URL).
+  const external = requests.filter((r) => !/^(blob:|data:)/.test(r.url) && new URL(r.url).origin !== URL_BASE);
+  const nonGet = requests.filter((r) => r.method !== 'GET' || r.body);
+  record(name, 'no request leaves the origin and none uploads data', external.length === 0 && nonGet.length === 0, `${requests.length} requests; external=${external.length}; non-GET/with body=${nonGet.length}`);
 
   const violations = await cspViolations(page);
   record(name, 'no CSP violations (load, scans, receipt export)', violations.length === 0, violations.join(' | '));
