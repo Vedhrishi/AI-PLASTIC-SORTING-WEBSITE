@@ -4,8 +4,9 @@
 // (with a fake camera device so the app's camera-gated "ready" state still
 // resolves in a headless CI environment), then uploads every image in
 // ./test-images/ through the app's own file-upload UI — exercising the
-// exact same Stage 1-4 pipeline (YOLO detection -> snapshot -> resin +
-// contamination ResNet18 classification) a real user hits.
+// exact same pipeline (COCO-SSD person veto + YOLO detection -> ResNet18 resin
+// classification) a real user hits. Contamination is a manual slider in the
+// UI, so it is not part of this evaluation.
 //
 // Usage: npm run test:eval
 
@@ -99,26 +100,20 @@ async function evaluateImage(page, filePath) {
       return {
         filename,
         resin: '—',
-        contamination: '—',
         inferenceMs,
         note: noteByStatus[finalStatus] ?? `Unexpected status: ${finalStatus}`,
       };
     }
 
     const resinEl = await page.$('[data-testid="result-resin"]');
-    const contaminationEl = await page.$('[data-testid="result-contamination"]');
     const resinConfEl = await page.$('[data-testid="result-resin-confidence"]');
-    const contamConfEl = await page.$('[data-testid="result-contamination-confidence"]');
 
     const resin = (await resinEl?.textContent())?.trim() ?? '—';
-    const contamination = (await contaminationEl?.textContent())?.trim() ?? '—';
     const resinConf = (await resinConfEl?.textContent())?.trim() ?? '';
-    const contamConf = (await contamConfEl?.textContent())?.trim() ?? '';
 
     return {
       filename,
       resin: resinConf ? `${resin} (${resinConf})` : resin,
-      contamination: contamConf ? `${contamination} (${contamConf})` : contamination,
       inferenceMs,
       note: '',
     };
@@ -126,7 +121,6 @@ async function evaluateImage(page, filePath) {
     return {
       filename,
       resin: '—',
-      contamination: '—',
       inferenceMs: Date.now() - startTime,
       note: `Timed out (${err.message})`,
     };
@@ -189,7 +183,7 @@ async function main() {
       process.stdout.write(`  Evaluating ${filename}... `);
       const result = await evaluateImage(page, filePath);
       results.push(result);
-      console.log(result.note ? `${result.note} (${result.inferenceMs}ms)` : `${result.resin} / ${result.contamination} (${result.inferenceMs}ms)`);
+      console.log(result.note ? `${result.note} (${result.inferenceMs}ms)` : `${result.resin} (${result.inferenceMs}ms)`);
     }
 
     console.log('\n=== Evaluation Results ===\n');
@@ -197,7 +191,6 @@ async function main() {
       results.map((r) => ({
         Filename: r.filename,
         'Predicted Resin': r.resin,
-        'Predicted Contamination': r.contamination,
         'Inference Time (ms)': r.inferenceMs,
         Note: r.note || '—',
       }))
